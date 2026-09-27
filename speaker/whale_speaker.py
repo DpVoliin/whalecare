@@ -26,19 +26,14 @@ from datetime import datetime, timedelta, timezone
 
 TZ = timezone(timedelta(hours=8))
 
-HUB = os.getenv("WHALE_HUB") or "https://YOUR_SERVER_IP:11443"
-CA = os.getenv("WHALE_CA") or str(pathlib.Path.home() / "hub" / "tls" / "hub.crt")
-TOKEN = os.getenv("WHALE_TOKEN") or "YOUR_HUB_TOKEN"
+HUB = os.getenv("WHALE_HUB") or "https://your-hub.example.com:11443"
+CA = "/home/ubuntu/hub/tls/hub.crt"
+TOKEN = os.getenv("WHALE_TOKEN") or ""   # 只从环境读（.whale_env）；不再留任何写死的回退值
 TERMINAL = "weixin"
 
 WEBHOOK_URL = "http://127.0.0.1:8644/webhooks/whale-hub"
-# ★ 运行目录：环境变量可覆盖，默认 ~/.hermes/scripts（换台机器直接能跑 ✓）
-# 移植时务必确认：BASE 定义在**第一次使用之前**，否则一加载就 NameError ✗
-# （2026-09-24 栽过两次：8 个测试错全是这一个根因 ✓）
-BASE = pathlib.Path(os.getenv("WHALE_SPEAKER_DIR") or (pathlib.Path.home() / ".hermes" / "scripts"))
-BASE.mkdir(parents=True, exist_ok=True)
-SECRET_FILE = str(BASE / ".whale_hub_secret")
-CARD_PATH = BASE / "whale_card.json"
+SECRET_FILE = "/home/ubuntu/.hermes/scripts/.whale_hub_secret"
+CARD_PATH = pathlib.Path("/home/ubuntu/.hermes/scripts/whale_card.json")
 _CARD_CACHE = {"at": 0.0, "card": None}
 
 
@@ -62,11 +57,12 @@ def load_card():
             card = {}
     _CARD_CACHE.update(at=_t.time(), card=card)
     return card
-# ★ 运行目录：环境变量可覆盖，默认 ~/.hermes/scripts（换台机器直接能跑 ✓）
+# ★ 运行目录（本机固定；仓库版用 WHALE_SPEAKER_DIR 可配置 ✓）
+BASE = pathlib.Path("/home/ubuntu/.hermes/scripts")
 
-RECENT_PATH = BASE / ".whale_said.jsonl"
-LAST_PROACTIVE = BASE / ".whale_last_proactive"
-CONFIG = pathlib.Path(os.getenv("WHALE_CONFIG") or (BASE.parent / "config.yaml"))
+RECENT_PATH = pathlib.Path("/home/ubuntu/.hermes/scripts/.whale_said.jsonl")
+LAST_PROACTIVE = pathlib.Path("/home/ubuntu/.hermes/scripts/.whale_last_proactive")
+CONFIG = pathlib.Path("/home/ubuntu/.hermes/config.yaml")
 
 POLL = 2.0                     # 秒：定点/紧急的响应速度
 GAP = 1.5                      # 秒：两条之间的间隔
@@ -74,7 +70,7 @@ QUIET = (23, 7)                # 免打扰时段（小时，跨夜）
 # ★ 下限从 5 分钟抬到 15 分钟：料多×0.6 与"你刚在用手机"×0.6 一叠加就只剩 8~10 分钟 ✗
 #   （实测 2 小时里决定了 12 次要说话）—— 定点/紧急提醒不受这个下限影响 ✓
 GAP_MIN, GAP_MAX = 15 * 60, 90 * 60
-GATE_STAMP = BASE / ".whale_last_gate"   # 上次"评估期望效用"的时间戳（防轮询空转刷屏）       # 主动说话的间隔上下限（秒）：最快 5 分钟，最慢 90 分钟
+GATE_STAMP = pathlib.Path("/home/ubuntu/.hermes/scripts/.whale_last_gate")   # 上次"评估期望效用"的时间戳（防轮询空转刷屏）       # 主动说话的间隔上下限（秒）：最快 5 分钟，最慢 90 分钟
 SAY_MAX_PER_DAY = 12                     # 每日上限（硬顶，可配置）
 # ★ 冷启动期（还没有任何反馈时）每天最多试探着说几条 —— 太少收集不到反馈，太多会烦人 ✓
 COLD_START_PER_DAY = int(os.getenv("WHALE_COLD_START_PER_DAY", "3"))
@@ -101,7 +97,7 @@ def daily_cap(st=None):
         return int(max(SAY_MIN_PER_DAY, min(SAY_MAX_PER_DAY, cap)))
     except Exception:
         return SAY_MAX_PER_DAY
-PACE_PATH = BASE / ".whale_pace.json"
+PACE_PATH = pathlib.Path("/home/ubuntu/.hermes/scripts/.whale_pace.json")
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0 Safari/537.36")
 
@@ -139,7 +135,7 @@ def hub(path, payload=None):
 # 主人的"最后说话时间"只从**本机** Hermes 会话库只读读取，不外发；
 # 读不到就什么都不记 —— 宁可不学，也不冤枉她。
 IMPLICIT_ON = os.getenv("WHALE_IMPLICIT", "1").lower() not in ("0", "false", "no", "off")
-ATTRIB = pathlib.Path(os.getenv("WHALE_ATTRIB") or (BASE / ".whale_attrib.json"))
+ATTRIB = pathlib.Path(os.getenv("WHALE_ATTRIB", "/home/ubuntu/.hermes/scripts/.whale_attrib.json"))
 HERMES_DB = pathlib.Path(os.getenv("WHALE_HERMES_DB", os.path.expanduser("~/.hermes/state.db")))
 SILENCE_DOWN_MIN = 180          # 多久没人影就算"不在场"→ 不记负反馈
 
@@ -227,8 +223,37 @@ def implicit_tick(min_age_min: int = 60):
     return sent
 
 
+# ★★ 投递失败退避（2026-09-27 加）
+#   故障现象：睡前总结一路**每 5 秒重试一次** ✗ → 打爆中枢"每来源 240 次/分"限流 ✗
+#   → 她所有调用都被 429 顶回去 → **彻底哑掉** ✓（用户："提醒又没了"）
+#   根因：deliver 失败后不 ack ✗ 主循环以为没处理完 → 下一轮(5秒)又试 ✓ 没有退避 ✓
+#   修法：**在 deliver 内部**做退避（所有路径共用 ✓ 一处修全好 ✓）
+#        失败 → 静默 N 分钟（429 更久 ✓）→ 期间直接返回"退避中"，连网络都不打 ✓
+FAIL_UNTIL = BASE / ".whale_fail_until"
+FAIL_COOLDOWN = int(os.getenv("WHALE_FAIL_COOLDOWN", "300"))       # 普通失败 5 分钟
+FAIL_COOLDOWN_429 = int(os.getenv("WHALE_FAIL_COOLDOWN_429", "900"))  # 限流 15 分钟
+
+
+def _fail_until_ts() -> float:
+    try:
+        return float(FAIL_UNTIL.read_text(encoding="utf-8").strip() or 0)
+    except Exception:
+        return 0.0
+
+
+def _fail_backoff(seconds: int, why: str) -> None:
+    try:
+        FAIL_UNTIL.write_text(str(time.time() + seconds), encoding="utf-8")
+        _dbg(f"投递失败退避 {seconds}s（{why}）—— 期间不再尝试，避免打爆限流 ✓")
+    except Exception:
+        pass
+
+
 def deliver(text: str):
-    """经网关 webhook 直投微信。"""
+    """经网关 webhook 直投微信。带**失败退避**（防止重试风暴打爆限流 ✗）。"""
+    left = _fail_until_ts() - time.time()
+    if left > 0:
+        return False, f"退避中（还有 {int(left)} 秒）"
     body = json.dumps({"text": text}, ensure_ascii=False).encode()
     ts = str(int(time.time()))
     sig = hmac.new(secret().encode(), f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
@@ -236,12 +261,24 @@ def deliver(text: str):
     req.add_header("Content-Type", "application/json")
     req.add_header("X-Webhook-Timestamp", ts)
     req.add_header("X-Webhook-Signature-V2", sig)
-    with urllib.request.urlopen(req, timeout=20) as r:
-        out = r.read().decode(errors="replace")
-    ok = r.status == 200 and '"delivered"' in out
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            out = r.read().decode(errors="replace")
+        ok = r.status == 200 and '"delivered"' in out
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            _fail_backoff(FAIL_COOLDOWN_429, "限流 429")
+        else:
+            _fail_backoff(FAIL_COOLDOWN, f"HTTP {e.code}")
+        raise
+    except Exception:
+        _fail_backoff(FAIL_COOLDOWN, "网络异常")
+        raise
     if ok:
         # ★ 投递成功 → 记一笔归因窗口，稍后由 implicit_tick 用"主人有没有反应"结账
         attribute_delivery(text)
+    else:
+        _fail_backoff(FAIL_COOLDOWN, "网关未确认 delivered")
     return ok, out[:200]
 
 
@@ -897,7 +934,7 @@ def last_signature():
 #   → 提醒在中枢里仍是"待发" → 下一轮又取到同一条 → 又发一遍 ✗✗
 #   解法：**发成功就本地记 id**；下次取到同 id 直接跳过并补回执 ✓
 #   （宁可"本地记了但中枢没收到回执"→ 多补一次 ack ✓ 也不能重复打扰主人 ✓）
-SENT_PATH = BASE / ".whale_sent_ids.jsonl"
+SENT_PATH = pathlib.Path("/home/ubuntu/.hermes/scripts/.whale_sent_ids.jsonl")
 
 
 def _sent_ids_load():
@@ -1051,17 +1088,27 @@ def watchdog_check(ctx: dict = None):
         except Exception:
             pass
         reasons = []
-        if int(d.get("errors", 0)) >= WATCHDOG_MAX_ERRORS:
+        # ★ 中枢连不上（2026-09-24 实测：服务器对外端口不通时，她一个字都发不出来 ✗
+        #   而且这种故障跟"模型空/接口错"是两码事 —— 该明确说"我连不上中枢" ✓）
+        try:
+            hub("/health")
+        except Exception as _e:
+            reasons.append(f"连不上中枢（服务器那边的事，不是本地问题）· 今天已失败 {d.get('errors', 0)} 次")
+        if int(d.get("errors", 0)) >= WATCHDOG_MAX_ERRORS and not reasons:
             reasons.append(f"接口连续出错 {d['errors']} 次")
-        if int(d.get("model_empty", 0)) >= WATCHDOG_MAX_ERRORS:
+        if int(d.get("model_empty", 0)) >= WATCHDOG_MAX_ERRORS and not reasons:
             reasons.append(f"模型返回空 {d['model_empty']} 次")
         last = d.get("last_sent_ts")
         if last:
             try:
                 dt = datetime.fromisoformat(last)
                 hours = (datetime.now(TZ) - dt).total_seconds() / 3600
+                if hours < 0:
+                    # ★ 未来时间戳 = 脏数据（今天实测有 2026-09-27 ✗）→ 忽略，否则判据永远失效 ✗
+                    _dbg(f"看门狗：last_sent_ts 是未来时间（{last}）→ 忽略它")
+                    hours = None
                 # 只在"有料"时才怪她不说（没料本来就不该说 ✓）
-                if hours >= WATCHDOG_SILENT_HOURS and (ctx.get("material") or 0) >= 2:
+                if hours is not None and hours >= WATCHDOG_SILENT_HOURS and (ctx.get("material") or 0) >= 2:
                     reasons.append(f"已经 {hours:.1f} 小时没开口（而今天有料）")
             except Exception:
                 pass
@@ -1250,7 +1297,7 @@ def topic_kind(text: str) -> str:
 def _log_decision(kind: str, gap_sec: float, reason: str, material: int, st: dict) -> None:
     """结构化决策日志：把"为什么这么决定"发到中枢落库（回放器靠它）。"""
     try:
-        import whale_adapt as _wa  # band_key() 在 whale_adapt 里
+        import whale_adapt as _wa          # band_key() 在 whale_adapt 里
         band = _wa.band_key()
     except Exception:
         band = ""
