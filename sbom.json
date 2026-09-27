@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:4eddae2d-2aa8-4a98-b224-a4d45d0090ee",
+  "serialNumber": "urn:uuid:6a377982-1b76-49a4-935e-75f4e04a6d1b",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-09-26T06:23:55Z",
+    "timestamp": "2026-09-27T23:47:42Z",
     "tools": [
       {
         "vendor": "whalecare",
@@ -14,14 +14,14 @@
     ],
     "component": {
       "type": "application",
-      "bom-ref": "pkg:generic/whalecare@0.1.26",
+      "bom-ref": "pkg:generic/whalecare@0.1.27",
       "name": "whalecare",
-      "version": "0.1.26",
+      "version": "0.1.27",
       "description": "个人数据中枢：单文件零依赖 Python（HTTP + SQLite + 规则引擎 + 脱敏）",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "25616c6461294cac0cd74d4f23820abbd7dc79a384582a0050c2115530f95a74"
+          "content": "59cfd4b80e1fb47f8fc44dae010b3092f03e01d3740aa6482bedaeebdff8e813"
         }
       ],
       "properties": [
@@ -39,14 +39,14 @@
   "components": [
     {
       "type": "application",
-      "bom-ref": "pkg:generic/whalecare@0.1.26",
+      "bom-ref": "pkg:generic/whalecare@0.1.27",
       "name": "whalecare",
-      "version": "0.1.26",
+      "version": "0.1.27",
       "description": "个人数据中枢：单文件零依赖 Python（HTTP + SQLite + 规则引擎 + 脱敏）",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "25616c6461294cac0cd74d4f23820abbd7dc79a384582a0050c2115530f95a74"
+          "content": "59cfd4b80e1fb47f8fc44dae010b3092f03e01d3740aa6482bedaeebdff8e813"
         }
       ],
       "properties": [

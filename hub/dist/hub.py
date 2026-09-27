@@ -68,7 +68,7 @@ except OSError:
     pass
 CFG_PATH = os.path.join(BASE, "hub.json")
 DB_PATH = os.path.join(BASE, "hub.db")
-VERSION = "0.1.26"
+VERSION = "0.1.27"
 TZ = timezone(timedelta(hours=8))          # 北京时间（用户在国内，固定 +8，避免服务器 UTC 漂移）
 
 DEFAULT_CFG = {
@@ -1569,9 +1569,20 @@ def analyze(day=None):
                     hh = int(t_first["start"].split(":")[0])
                 except Exception:
                     hh = 9
+                # ★ 2026-09-27 修（用户原话"早上提醒明早的干嘛"）：
+                #   原来只看"明天第一节早于 9 点" ✗ **不看现在几点** ✓
+                #   → 早间简报里也冒出"明早 08:00 有课…今晚别熬太晚" ✗ 时间和语境全错位 ✓
+                #   修法：按**时间语境**分流 ——
+                #     傍晚/深夜（18:00~05:00）：睡前口径"明早…今晚别熬太晚" ✓
+                #     白天（含早间简报）：中性口径"明天 X 第一节有课" ✓（信息保留，话别说错 ✓）
+                now_h = datetime.now(TZ).hour
                 if hh < 9:
-                    out.append({"level": "warn",
-                                "text": f"明早 {t_first['start']} 有课（{t_first['name']}），今晚别熬太晚。"})
+                    if now_h >= 18 or now_h < 5:
+                        out.append({"level": "warn",
+                                    "text": f"明早 {t_first['start']} 有课（{t_first['name']}），今晚别熬太晚。"})
+                    else:
+                        out.append({"level": "info",
+                                    "text": f"明天 {t_first['start']} 第一节有课（{t_first['name']}）。"})
 
         # ⑦ 日程：今天还有什么安排
         events = calendar_today(day)
