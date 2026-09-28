@@ -184,6 +184,40 @@ def cmd_scheduled(a):
         print(f"  #{r['id']:<4} {r['at_iso'][:16]}  {'每天' if r['daily'] else '一次'}  {state}  {(r['text'] or '')[:44]}")
 
 
+def cmd_analysis(a):
+    """分析出口（**数据出口**）：看她"分析出来的数据"，不是她说的话。"""
+    c = db()
+    if not has(c, "analyses"):
+        return print("  这个库还没有 analyses 表（升到 v0.2.0 后跑一次中枢就会自动建）")
+    n = max(1, int(getattr(a, "limit", 1) or 1))
+    rows = c.execute("SELECT id, ts, day, engine, data FROM analyses "
+                     "ORDER BY id DESC LIMIT ?", (n,)).fetchall()
+    if not rows:
+        return print("  还没有分析结果（写入方：说话层 whale_analyze.py → POST /analysis）")
+    if getattr(a, "json", False):
+        # ★ 给脚本用：形状与 GET /analysis 的 items 一致（analysis 已解析成对象，不是字符串）
+        items = []
+        for r in rows:
+            try:
+                d = json.loads(r["data"])
+            except Exception:
+                d = None
+            items.append({"id": r["id"], "ts": r["ts"], "day": r["day"],
+                          "engine": r["engine"], "analysis": d})
+        return print(json.dumps(items, ensure_ascii=False, indent=2))
+    hr("分析出口（最近 %d 份）" % len(rows))
+    for r in rows:
+        try:
+            raw = json.loads(r["data"])
+        except Exception:
+            print("  #%s %s  解析失败" % (r["id"], r["ts"]))
+            continue
+        keys = ", ".join(sorted(raw.keys())) if isinstance(raw, dict) else type(raw).__name__
+        print("  #%-4s %s  引擎 %-16s 字段 %s" % (r["id"], str(r["ts"])[:16],
+                                                  (r["engine"] or "-")[:16], keys[:64]))
+        print("         %s" % json.dumps(raw, ensure_ascii=False)[:320])
+
+
 def cmd_timetable(a):
     c = db()
     if not has(c, "timetable"):
@@ -968,6 +1002,10 @@ def main():
     r.set_defaults(fn=cmd_reminders)
     sub.add_parser("scheduled", help="定点提醒").set_defaults(fn=cmd_scheduled)
     sub.add_parser("timetable", help="课表").set_defaults(fn=cmd_timetable)
+    an = sub.add_parser("analysis", help="分析出口：看 AI 分析出来的**数据**（不是句子）")
+    an.add_argument("-n", "--limit", type=int, default=1)
+    an.add_argument("--json", action="store_true", help="原样打印（给脚本用）")
+    an.set_defaults(fn=cmd_analysis)
     ch = sub.add_parser("chats", help="对话记录")
     ch.add_argument("-n", "--limit", type=int, default=10); ch.set_defaults(fn=cmd_chats)
     sub.add_parser("stats", help="今日概览").set_defaults(fn=cmd_stats)

@@ -148,7 +148,9 @@ by **mechanisms**, not by "remembering to check":
 
 The primary path is *speaker → gateway webhook → WeChat*. The hub also ships its own
 **direct-send** channels — deliberately **never automatic** (so they can't duplicate the
-speaker), meant for cron / extensions / manual calls. All are plain HTTP, no SDK, no deps:
+speaker), meant for cron / extensions / manual calls. All are plain HTTP, no SDK, no deps.
+**8 of them are text channels** (they send *words*, for humans); the **9th is a data channel**
+(it sends **AI-analysed structured data**, for machines):
 
 | Channel | Config keys | Notes |
 |---|---|---|
@@ -160,9 +162,45 @@ speaker), meant for cron / extensions / manual calls. All are plain HTTP, no SDK
 | **DingTalk** | `channels.dingtalk_webhook` (+`dingtalk_secret`) | official custom-robot webhook, optional official signing |
 | **Discord** | `channels.discord_webhook` | official webhook, `{"content": ...}` |
 | **QQ** | `channels.qq_appid` + `qq_secret` + `qq_target` (+`qq_kind`) | **official bot API** — fetch `access_token`, then `POST /v2/users|groups/<id>/messages` |
+| **Analysis** (data) | `channels.analysis_webhook` / `analysis_file` | sends **data, not sentences** — see below |
 
 Check status with `hubctl channels` (reports *configured / empty* only — never prints the
 webhook URL itself, since that URL is a credential). Send a test with `POST /channels?test=1`.
+
+### The 9th channel: analysis out (data, not sentences)
+
+The first 8 channels emit **prose**. The analysis channel emits the **result of having an AI
+analyse the data** — structured JSON (values / trends / outliers / pairs / scores / tags) with
+**no wording applied at all** — for a **machine** to consume: your own dashboard, a script, the
+desktop widget, an MCU screen.
+
+```
+hub /llm-preview (already redacted)
+   └─▶ speaker/whale_analyze.py: model is told to *compute JSON*, not to write prose
+          └─▶ normalised to the spec + dry-run against the hub validator → POST /analysis
+                 └─▶ hub **hard-validates** the spec: non-conforming is rejected;
+                     conforming is stored + fanned out to
+                        ├─ channels.analysis_webhook  (POST the JSON to your service)
+                        ├─ channels.analysis_file     (atomic JSON file for widget/web/MCU)
+                        └─ GET /analysis?limit=N      (pull it; works with no channel configured)
+```
+
+**The format is a spec, not a best effort**: [`docs/analysis.schema.json`](docs/analysis.schema.json)
+(JSON Schema 2020-12; human version [`docs/ANALYSIS-FORMAT.md`](docs/ANALYSIS-FORMAT.md)). The hub
+embeds a copy and hard-validates on `POST /analysis` — non-conforming payloads are **rejected**
+(not stored, not fanned out) and audited. Helpers: `GET /analysis/schema` returns the spec itself,
+`POST /analysis?validate=1` dry-runs it.
+
+Three invariants, each enforced by a mechanism rather than by good intentions:
+
+| Invariant | How it's enforced |
+|---|---|
+| **Only redacted context** | the analyser reads the same `/llm-preview` payload (no raw notifications, app names, minute-level timestamps or location) — it never opens a new data source |
+| **Never invent data** | every metric `id` must exist in that context (otherwise the item is dropped and counted); values that don't match the context are flagged `unverified=true` |
+| **Never write prose** | all strings must be short labels (≤24 chars, no sentence punctuation); the spec validator rejects prose, the writer feeds errors back for one rewrite, and gives up rather than sending garbage |
+
+Run it: `python3 speaker/whale_analyze.py --now` (analyse + send), `--dry` (analyse only),
+`--show -n 3`, `--schema`. Hub side: `hubctl analysis`.
 
 > If you run this on **Hermes**, prefer its platform plugins for DingTalk / Discord / Feishu /
 > WeCom / ntfy / Telegram / Slack / WhatsApp (`hermes plugins enable <name>-platform`) — those

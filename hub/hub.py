@@ -68,7 +68,7 @@ except OSError:
     pass
 CFG_PATH = os.path.join(BASE, "hub.json")
 DB_PATH = os.path.join(BASE, "hub.db")
-VERSION = "0.1.27"
+VERSION = "0.2.0"
 TZ = timezone(timedelta(hours=8))          # 北京时间（用户在国内，固定 +8，避免服务器 UTC 漂移）
 
 DEFAULT_CFG = {
@@ -121,6 +121,15 @@ DEFAULT_CFG = {
         "wecom_touser": "@all",
         # 通用出口：任何接受 POST {"text": "..."} 的地址（自建转发服务 / Slack-Discord 中转）
         "generic_webhook": "",
+        # ── 第 9 个出口：**分析出口**（数据出口，v0.2.0）────────────────────────
+        #   上面 8 个发的都是「话」（自然语言，给人看）；这个发的是 **AI 分析后的结构化数据**
+        #   （JSON），给**机器**消费 —— 你自己的看板 / 脚本 / 挂件 / 设备。
+        #   所以它**不做任何文本包装**：不拼问候、不句化、不加"鲸鲸说"。
+        #   AI 分析在**说话层**跑（模型 key 只在本机，中枢红线是不持有 key），
+        #   结果 POST /analysis 进来 → 落库（analyses 表）+ 从这里分发出去。
+        "analysis_webhook": "",       # POST {"type":"analysis","schema":1,...} 到任意地址
+        "analysis_file": "",          # 或落一个 JSON 文件（原子写：先 .tmp 再 replace）给挂件/网页/设备读
+        "analysis_keep": 50,          # 库里保留最近 N 次分析（0 = 不裁剪）
     },
     "privacy": {
         # 哪些分类**值得拿出来说**（其余如 学习/办公/工具/其他 一律不提）
@@ -537,7 +546,7 @@ def db():
 # 失败也不会让中枢起不来（报出来 + `hubctl schema` 能看出落在哪一版）。
 # 硬要求：**每个迁移都必须幂等**（IF NOT EXISTS / 先查再加列）—— 老库 user_version=0
 # 但表已存在，会被当成"从头跑一遍"，不幂等就会炸。
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _MIGRATIONS = []
 
 
@@ -1014,6 +1023,31 @@ def _mig_006_throttle_and_consent(conn):
         note TEXT DEFAULT ''
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_consents_what ON consents(what, id)")
+
+
+@migration
+def _mig_007_analysis_out(conn):
+    """v7：「分析出口」的落库 = 数据出口的发件箱（v0.2.0）。
+
+    为什么这个出口要落库、而 8 个文本出口不用：
+      文本出口发的是「话」，发完就过去了（要不要留痕由 reminders/episodes 管）。
+      分析出口发的是**结构化数据**，它有三个额外需求：
+        ① 挂件 / 网页 / 设备要能随时**拉最近一次**（不用一直挂着 webhook）；
+        ② 要能看出这份分析是**什么时候、谁产的**（模型名），否则数字对不上没人知道为什么；
+        ③ 一份分析可能要**发给多个消费者**（webhook + 文件），落库是唯一真相。
+
+    只存分析结果本身（它已经是脱敏后的聚合/派生数据），**不存原始通知与原文**。
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS analyses(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,        -- 产出时刻（ISO）
+            day TEXT DEFAULT '',     -- 这份分析针对哪一天
+            engine TEXT DEFAULT '',  -- 谁产的（模型名 / 脚本名），用于对账
+            data TEXT NOT NULL       -- 分析结果 JSON（结构化数据，不是句子）
+        );
+        CREATE INDEX IF NOT EXISTS idx_analyses_ts ON analyses(ts DESC);
+    """)
 
 
 AUTH_LIMIT = 5            # 窗口内允许的失败次数
@@ -3210,7 +3244,9 @@ def ext_loop():
 CHANNEL_KEYS = ("wecom_webhook", "generic_webhook", "wecom_corpid", "wecom_secret", "wecom_agentid",
                 "wecom_touser", "ntfy_url", "ntfy_token", "bark_url", "bark_sound",
                 "dingtalk_webhook", "dingtalk_secret", "discord_webhook",
-                "qq_appid", "qq_secret", "qq_target", "qq_kind", "qq_api_base", "qq_token_url")
+                "qq_appid", "qq_secret", "qq_target", "qq_kind", "qq_api_base", "qq_token_url",
+                # 第 9 个出口（数据出口）—— 见文件末尾注释
+                "analysis_webhook", "analysis_file", "analysis_keep")
 
 
 def channels_status(cfg=None):
@@ -3229,7 +3265,15 @@ def channels_status(cfg=None):
         "qq": ("已配置（%s）" % ("群" if (ch.get("qq_kind") or "user") == "group" else "私聊"))
               if all(ch.get(k) for k in ("qq_appid", "qq_secret", "qq_target"))
               else "空（需官方 AppID + Secret + 目标 openid）",
-        "note": "主出口仍是说话层→网关；这里是中枢**直发**通道，不自动使用",
+        # ★ 第 9 个出口是**数据出口**（发结构化数据，不发句子）—— 状态与上面 8 个分开报，
+        #   免得有人以为"配了它她就会多说话"
+        "analysis": ("已配置（%s）" % "、".join(
+            [n for n, v in (("webhook", ch.get("analysis_webhook")),
+                            ("file", ch.get("analysis_file"))) if v])
+            if (ch.get("analysis_webhook") or ch.get("analysis_file"))
+            else "空（数据出口；不填也能用 GET /analysis 拉最近一次）"),
+        "note": "主出口仍是说话层→网关；这里是中枢**直发**通道，不自动使用"
+                "（analysis 发**结构化数据**，其余 8 个发**文本**）",
     }
 
 
@@ -3391,6 +3435,472 @@ def channel_send(text, cfg=None):
 def channel_test(cfg=None):
     """发一条测试消息（配出口时用它验收，别等真有事才发现不通）。"""
     return channel_send("（测试）whalecare 直发通道已连通 —— 收到即说明配置生效。", cfg)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  第 9 个出口：**分析出口**（数据出口）
+#
+#  和上面 8 个的根本区别是**发的东西**，不是发的地方：
+#      · 那 8 个发的是**句子**（她的话）→ 给人看 → 所以会拼问候、会截断到 1800 字
+#      · 这个发的是**结构化数据**（AI 分析后的结果）→ 给**机器**看 →
+#        所以它**一个字都不加工**：原样 JSON，不句化、不加称呼、不截断成散文
+#
+#  "利用 AI 分析处理数据"这一步**不在这里做**，原因是一条红线：
+#  中枢跑在服务器上、**不持有任何模型 API key**（key 只在本机，见 docs/PRIVACY.md）。
+#  所以分工是：
+#      说话层 `whale_analyze.py`（本机，有 key）→ 脱敏上下文 → 让模型输出 JSON
+#        → POST /analysis → **这里**：落库 + 分发给消费者（webhook / 文件）
+#  这样"AI 分析"和"出口配置"各自待在正确的那一边。
+#
+#  消费者（都属于"机器"这一类）：
+#      · `channels.analysis_webhook` —— POST 一份 JSON 给你自己的看板/服务
+#      · `channels.analysis_file`    —— 原子落一个 JSON 文件给挂件/网页/设备读
+#      · `GET /analysis`             —— 直接拉最近一次（不配任何出口也能用）
+# ══════════════════════════════════════════════════════════════════════════════
+ANALYSIS_MAX_BYTES = 64 * 1024      # 一份分析的上限：它是数据，不该长成散文
+ANALYSIS_TOP_KEYS = ("v", "day", "values", "trends", "outliers", "pairs", "scores", "tags", "notes")
+
+# ★ 格式规范 = **docs/analysis.schema.json**，这里嵌的是它的**原文**。
+#   为什么单文件分发要自带规范：① 中枢必须能独立校验（不读磁盘、不装 jsonschema —— 本项目零依赖）
+#   ② 要能把规范本身发给消费者（GET /analysis/schema）。
+#   两份漂移由 tests/test_analysis_schema.py 兜住（嵌入原文 vs 仓库文档，按结构逐项比对）。
+ANALYSIS_SCHEMA_JSON = r'''{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/DpVoliin/whalecare/blob/main/docs/analysis.schema.json",
+  "title": "whalecare 分析出口 · 数据格式",
+  "description": "分析出口（第 9 个出口）的 payload 里 analysis 字段的规范格式。中枢在 POST /analysis 时按本文件**硬校验**，不符合直接拒收。人读版说明见 docs/ANALYSIS-FORMAT.md。",
+  "version": 1,
+  "type": "object",
+  "required": ["v"],
+  "additionalProperties": false,
+  "$defs": {
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 24,
+      "pattern": "^[^。，！？；：、\\n\\r]*$",
+      "description": "短标签：≤24 字，且不含句读 —— 数据出口不装句子"
+    },
+    "metric_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 48,
+      "pattern": "^[^\\s。，！？；：、\"'（）()\\[\\]【】{}<>《》/\\\\|]+$",
+      "description": "指标 id：必须与中枢 llm_context 里的键**逐字相同**（点号路径或叶子键都认）。允许中文（如游戏名/分类名），但不含空白、句读、引号与括号 —— 它是标识符，不是文本"
+    },
+    "conf": {
+      "enum": ["low", "mid", "high"],
+      "description": "置信度；样本天数 n < 5 时必须为 low"
+    }
+  },
+  "properties": {
+    "v": {
+      "const": 1,
+      "description": "格式版本。本文件即 v1；破坏性改动必须升版本，读方应拒收不认识的 v"
+    },
+    "day": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "这份分析针对哪一天（本地时区）"
+    },
+    "values": {
+      "type": "array",
+      "maxItems": 40,
+      "description": "指标现值（只放上下文中真实存在的指标）",
+      "items": {
+        "type": "object",
+        "required": ["id", "v"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/metric_id" },
+          "v": { "type": "number" },
+          "unit": { "$ref": "#/$defs/label" },
+          "unverified": {
+            "type": "boolean",
+            "description": "true = 该数值无法与上下文直接对上（派生值/换算值）。写端应尽力核对，读端应把它当弱证据"
+          }
+        }
+      }
+    },
+    "trends": {
+      "type": "array",
+      "maxItems": 40,
+      "description": "趋势（相对基线）。方向必须由数值算出，不是形容",
+      "items": {
+        "type": "object",
+        "required": ["id", "dir"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/metric_id" },
+          "dir": { "enum": ["up", "down", "flat"] },
+          "delta_pct": { "type": "number", "description": "相对变化百分比（+12 = 涨 12%）" },
+          "vs": { "$ref": "#/$defs/label", "description": "基线是什么（如 7日均值）" },
+          "conf": { "$ref": "#/$defs/conf" }
+        }
+      }
+    },
+    "outliers": {
+      "type": "array",
+      "maxItems": 40,
+      "description": "异常点。z 是标准分，不是主观判断",
+      "items": {
+        "type": "object",
+        "required": ["id", "side"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/metric_id" },
+          "side": { "enum": ["high", "low"] },
+          "z": { "type": "number" },
+          "conf": { "$ref": "#/$defs/conf" }
+        }
+      }
+    },
+    "pairs": {
+      "type": "array",
+      "maxItems": 20,
+      "description": "两指标的共变关系。n 是样本天数，必须给 —— 没有 n 的相关系数是耍流氓",
+      "items": {
+        "type": "object",
+        "required": ["a", "b"],
+        "additionalProperties": false,
+        "properties": {
+          "a": { "$ref": "#/$defs/metric_id" },
+          "b": { "$ref": "#/$defs/metric_id" },
+          "rho": { "type": "number", "minimum": -1, "maximum": 1 },
+          "n": { "type": "integer", "minimum": 1 },
+          "conf": { "$ref": "#/$defs/conf" }
+        }
+      }
+    },
+    "scores": {
+      "type": "array",
+      "maxItems": 20,
+      "description": "派生评分（0~of 的整数分制）。自定义名字用短标签，不得含句读",
+      "items": {
+        "type": "object",
+        "required": ["id", "v"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/label" },
+          "v": { "type": "number", "minimum": 0, "maximum": 100 },
+          "of": { "type": "number", "minimum": 1, "description": "满分，默认 100" }
+        }
+      }
+    },
+    "tags": {
+      "type": "array",
+      "maxItems": 12,
+      "description": "状态标签（短词，如 睡眠不足 / 久坐）。读端用来做筛选与着色",
+      "items": { "$ref": "#/$defs/label" }
+    },
+    "notes": {
+      "type": "array",
+      "maxItems": 6,
+      "description": "数据侧的说明（**不是**给她/给人的嘱咐）。缺数据、口径变化等",
+      "items": { "$ref": "#/$defs/label" }
+    }
+  },
+  "examples": [
+    {
+      "v": 1,
+      "day": "2026-09-28",
+      "values": [
+        { "id": "screen_active_minutes", "v": 554, "unit": "min" },
+        { "id": "sleep_minutes", "v": 420, "unit": "min" }
+      ],
+      "trends": [
+        { "id": "screen_active_minutes", "dir": "up", "delta_pct": 14, "vs": "7日均值", "conf": "mid" }
+      ],
+      "outliers": [
+        { "id": "screen_active_minutes", "side": "high", "z": 2.1, "conf": "mid" }
+      ],
+      "pairs": [
+        { "a": "game_minutes", "b": "screen_active_minutes", "rho": 0.62, "n": 9, "conf": "mid" }
+      ],
+      "scores": [
+        { "id": "作息规律", "v": 72, "of": 100 }
+      ],
+      "tags": ["睡眠不足", "久坐"],
+      "notes": ["心率今日缺"]
+    }
+  ]
+}'''
+
+# ★ 信封里报的格式版本号：**从规范本身读**（不手工写第二遍，免得两处漂移）
+ANALYSIS_SCHEMA_VERSION = json.loads(ANALYSIS_SCHEMA_JSON).get("version", 1)
+
+# 零依赖校验器：规则表是把上面那份 schema 手工映射过来的（改 schema 必须同步改这里，测试会拦）
+_LABEL_BAD = "。，！？；：、\n\r"
+_LABEL_MAX = 24
+# 标识符（指标 id）禁用字符：空白 + 句读 + 引号括号 —— 允许中文（游戏名/分类名也可能是键）
+_ID_BAD = set(' \t\r\n。，！？；：、"\'（）()[]【】{}<>《》/\\|')
+
+
+def _en(*vals):
+    return ("enum",) + vals
+
+
+def _num(lo=None, hi=None):
+    return ("num", lo, hi)
+
+
+def _int(lo=None, hi=None):
+    return ("int", lo, hi)
+
+
+_ANALYSIS_ITEM_RULES = {
+    "values": {"req": ("id", "v"), "max": 40,
+               "f": {"id": ("id",), "v": _num(), "unit": ("label",), "unverified": ("bool",)}},
+    "trends": {"req": ("id", "dir"), "max": 40,
+               "f": {"id": ("id",), "dir": _en("up", "down", "flat"),
+                     "delta_pct": _num(), "vs": ("label",), "conf": _en("low", "mid", "high")}},
+    "outliers": {"req": ("id", "side"), "max": 40,
+                 "f": {"id": ("id",), "side": _en("high", "low"), "z": _num(),
+                       "conf": _en("low", "mid", "high")}},
+    "pairs": {"req": ("a", "b"), "max": 20,
+              "f": {"a": ("id",), "b": ("id",), "rho": _num(-1, 1), "n": _int(1, None),
+                    "conf": _en("low", "mid", "high")}},
+    "scores": {"req": ("id", "v"), "max": 20,
+               "f": {"id": ("label",), "v": _num(0, 100), "of": _num(1, None)}},
+}
+_ANALYSIS_LABEL_ARRAYS = {"tags": 12, "notes": 6}
+
+
+def _chk(spec, val):
+    """按一条字段规则检查单个值，返回错误说明（"" = 通过）。"""
+    kind = spec[0]
+    if kind == "label":
+        if not isinstance(val, str) or not val or len(val) > _LABEL_MAX or any(c in val for c in _LABEL_BAD):
+            return "要短标签（1~%d 字且不含句读）" % _LABEL_MAX
+        return ""
+    if kind == "id":
+        if not isinstance(val, str) or not val or len(val) > 48 or any(c in _ID_BAD for c in val):
+            return "要指标 id（1~48 字，且不含空白/句读/引号括号）"
+        return ""
+    if kind == "bool":
+        return "" if isinstance(val, bool) else "要布尔值"
+    if kind in ("num", "int"):
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            return "要数字"
+        if kind == "int" and not float(val).is_integer():
+            return "要整数"
+        lo, hi = spec[1], spec[2]
+        if lo is not None and val < lo:
+            return "不得小于 %s" % lo
+        if hi is not None and val > hi:
+            return "不得大于 %s" % hi
+        return ""
+    if kind == "enum":
+        return "" if val in spec[1:] else "只能是 %s" % "/".join(str(x) for x in spec[1:])
+    return "未知规则"
+
+
+def analysis_validate(data):
+    """按 docs/analysis.schema.json 校验一份分析结果。返回错误列表（空列表 = 合规）。
+
+    硬校验（不是提醒）：`POST /analysis` 不合规直接拒收 —— 出口的契约就是"数据"，
+    放一段话进来会污染所有下游（看板 / 脚本 / 设备），而且事后没法补救。
+    """
+    errs = []
+    if not isinstance(data, dict):
+        return ["顶层必须是一个 JSON 对象"]
+    for k in data:
+        if k not in ANALYSIS_TOP_KEYS:
+            errs.append("顶层多了不允许的键：%s" % k)
+    if data.get("v") != 1:
+        errs.append("v 必须等于 1（v1 格式；不认识的版本读方应拒收）")
+    d = data.get("day")
+    if d is not None and not (isinstance(d, str) and len(d) == 10 and d[4] == "-" and d[7] == "-"):
+        errs.append("day 要 YYYY-MM-DD（收到 %r）" % (d,))
+    for key, rule in _ANALYSIS_ITEM_RULES.items():
+        v = data.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, list):
+            errs.append("%s 必须是数组" % key)
+            continue
+        if len(v) > rule["max"]:
+            errs.append("%s 最多 %d 条（现在 %d）" % (key, rule["max"], len(v)))
+        for n, it in enumerate(v[:rule["max"]]):
+            if not isinstance(it, dict):
+                errs.append("%s[%d] 必须是对象" % (key, n))
+                continue
+            for f in rule["req"]:
+                if f not in it:
+                    errs.append("%s[%d] 缺必填字段 %s" % (key, n, f))
+            for f, fs in rule["f"].items():
+                if f in it:
+                    bad = _chk(fs, it[f])
+                    if bad:
+                        errs.append("%s[%d].%s %s（收到 %r）" % (key, n, f, bad, it[f]))
+            for f in sorted(it):
+                if f not in rule["f"]:
+                    errs.append("%s[%d] 多了不允许的字段：%s" % (key, n, f))
+    for key, mx in _ANALYSIS_LABEL_ARRAYS.items():
+        v = data.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, list):
+            errs.append("%s 必须是数组" % key)
+            continue
+        if len(v) > mx:
+            errs.append("%s 最多 %d 条" % (key, mx))
+        for n, x in enumerate(v[:mx]):
+            bad = _chk(("label",), x)
+            if bad:
+                errs.append("%s[%d] %s（收到 %r）" % (key, n, bad, x))
+    if len(errs) > 20:
+        errs = errs[:20] + ["……还有 %d 条" % (len(errs) - 20)]
+    return errs
+
+
+def analysis_payload(data, engine="", day=""):
+    """包一层**信封**（信封里只有元数据，没有句子）。"""
+    return {"type": "analysis", "schema": ANALYSIS_SCHEMA_VERSION, "at": now_iso(),
+            "day": str(day or today_str())[:10], "engine": str(engine or "")[:60],
+            "analysis": data}
+
+
+def _write_json_atomic(path, payload):
+    """原子写 JSON：先写 `.tmp` 再 `os.replace`。
+
+    为什么不用直接 `open(w).write()`：读方是**别的进程**（挂件/网页/设备），
+    直接写会让它们读到**半个文件**（JSON 解析失败 → 看板上数字忽然全空）。
+    `os.replace` 在同一文件系统上是原子的。
+    """
+    import os
+    p = os.path.expanduser(str(path))
+    d = os.path.dirname(os.path.abspath(p))
+    if d and not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, p)
+    return "ok"
+
+
+def analysis_send(payload, cfg=None):
+    """把已包好的分析信封发到**分析出口**。返回 {出口: "ok"/错误}（只走数据出口，不碰文本出口）。"""
+    ch = (cfg or CFG).get("channels") or {}
+    out = {}
+    url = (ch.get("analysis_webhook") or "").strip()
+    if url:
+        try:
+            st, body = _post_json(url, payload, timeout=15)
+            out["analysis_webhook"] = "ok" if st in (200, 201, 202, 204) else "HTTP %s %s" % (st, body[:60])
+        except Exception as e:
+            out["analysis_webhook"] = "%s: %s" % (type(e).__name__, str(e)[:60])
+    path = (ch.get("analysis_file") or "").strip()
+    if path:
+        try:
+            out["analysis_file"] = _write_json_atomic(path, payload)
+        except Exception as e:
+            out["analysis_file"] = "%s: %s" % (type(e).__name__, str(e)[:60])
+    if not out:
+        out["note"] = ("没配 channels.analysis_webhook / analysis_file —— "
+                       "分析已入库，仍可用 GET /analysis 拉最近一次")
+    try:
+        audit("analysis_send", target=",".join(sorted(k for k in out if k != "note")),
+              result="ok" if "ok" in str(list(out.values())) else "error",
+              note="分析出口一份（%d 字节）" % len(json.dumps(payload, ensure_ascii=False)))
+    except Exception:
+        pass
+    return out
+
+
+def analysis_store(engine, data, day=""):
+    """落库（分析出口的发件箱）+ 按 `channels.analysis_keep` 裁剪。返回新记录 id。"""
+    try:
+        keep = int((CFG.get("channels") or {}).get("analysis_keep") or 50)
+    except (TypeError, ValueError):
+        keep = 50
+    blob = json.dumps(data, ensure_ascii=False)
+    with db() as c:
+        cur = c.execute("INSERT INTO analyses(ts, day, engine, data) VALUES (?,?,?,?)",
+                        (now_iso(), str(day or today_str())[:10], str(engine or "")[:60], blob))
+        rid = cur.lastrowid
+        if keep > 0:
+            c.execute("DELETE FROM analyses WHERE id NOT IN "
+                      "(SELECT id FROM analyses ORDER BY id DESC LIMIT ?)", (keep,))
+    return rid
+
+
+def analysis_recent(limit=1):
+    """最近 N 份分析（新的在前）。`data` 解析失败时给 None，不炸。"""
+    with db() as c:
+        rows = c.execute("SELECT id, ts, day, engine, data FROM analyses "
+                         "ORDER BY id DESC LIMIT ?", (max(1, int(limit)),)).fetchall()
+    out = []
+    for r in rows:
+        try:
+            d = json.loads(r["data"])
+        except Exception:
+            d = None
+        out.append({"id": r["id"], "ts": r["ts"], "day": r["day"],
+                    "engine": r["engine"], "analysis": d})
+    return out
+
+
+def analysis_ingest(body, client="", validate_only=False):
+    """`POST /analysis` 的处理：**按规范硬校验** → 落库 → 分发给分析出口。
+
+    validate_only（`?validate=1`）：只校验不落库 —— 写端可以先干跑一遍再发。
+    """
+    b = body if isinstance(body, dict) else {}
+    data = b.get("analysis") if isinstance(b.get("analysis"), dict) else b
+    if not isinstance(data, dict) or not data:
+        return {"ok": False, "error": "要传一个 JSON 对象（分析结果）：`{...}` 或 `{\"analysis\": {...}}`"}
+    size = len(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+    if size > ANALYSIS_MAX_BYTES:
+        return {"ok": False, "error": "分析结果太大（%d 字节 > %d）—— 数据出口不该发这么长的东西"
+                % (size, ANALYSIS_MAX_BYTES)}
+    errs = analysis_validate(data)
+    if validate_only:
+        return {"ok": not errs, "errors": errs, "bytes": size, "schema": "/analysis/schema"}
+    if errs:
+        # ★ 拒收（不是警告）：格式是出口的契约；放进来会污染所有下游，事后没法补救
+        try:
+            audit("analysis_reject", target=",".join(sorted(data)[:6]), actor=client or "?",
+                  result="denied", note="不符合 schema v1 的 %d 条" % len(errs))
+        except Exception:
+            pass
+        return {"ok": False, "rejected": True, "bytes": size, "errors": errs, "schema": "/analysis/schema",
+                "error": "不符合 docs/analysis.schema.json（v1）—— 已拒收，未落库未分发"}
+    engine = str(b.get("engine") or b.get("model") or "")[:60]
+    day = str(b.get("day") or "")[:10]
+    rid = analysis_store(engine, data, day)
+    fan = analysis_send(analysis_payload(data, engine=engine, day=day))
+    res = {"ok": True, "id": rid, "bytes": size, "fanout": fan, "schema": "/analysis/schema",
+           "note": "已入库；GET /analysis 可拉最近一次"}
+    unver = sum(1 for it in (data.get("values") or []) if isinstance(it, dict) and it.get("unverified"))
+    if unver:
+        res["warn"] = "有 %d 个数值标了 unverified（对不上上下文，读端应视作弱证据）" % unver
+    print("[analysis] #%s %s %d 字节 → %s" % (rid, engine or "-", size,
+                                              ",".join("%s=%s" % kv for kv in fan.items())), flush=True)
+    return res
+
+
+def analysis_view(q=None):
+    """`GET /analysis`：最近 N 次分析 + 出口状态（挂件/脚本/人 都能拉）。"""
+    q = q or {}
+    try:
+        n = int((q.get("limit") or ["1"])[0])
+    except (TypeError, ValueError):
+        n = 1
+    n = max(1, min(20, n))
+    items = analysis_recent(n)
+    try:
+        st = channels_status().get("analysis")
+    except Exception:
+        st = ""
+    return {"count": len(items), "items": items, "analysis_channel": st,
+            "schema": "/analysis/schema",
+            "schema_version": json.loads(ANALYSIS_SCHEMA_JSON).get("version"),
+            "how_to_write": "POST /analysis {\"analysis\": {...}, \"engine\": \"模型名\"}（X-Token 头）；"
+                            "可先干跑 POST /analysis?validate=1"}
 # ----------------------------------------------------------------- 调度线程
 def scheduler():
     """每 5 秒看一眼：到点生成简报 / 发现异常立刻说（不依赖外部 cron）。
@@ -4009,6 +4519,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, self._devices())
         if path == "/channels":
             return self._send(200, channels_status())
+        if path == "/analysis":
+            # 分析出口（**数据出口**）：拉最近 N 份 AI 分析结果 —— 没配 webhook/文件也能用
+            return self._send(200, analysis_view(q))
+        if path == "/analysis/schema":
+            # 数据格式规范**本身**（机器可读）—— 消费者不必去翻仓库，直接拿这份
+            return self._send(200, json.loads(ANALYSIS_SCHEMA_JSON))
         if path == "/remind":
             with db() as c:
                 rows = c.execute("SELECT * FROM scheduled WHERE fired_at IS NULL "
@@ -4171,6 +4687,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"ok": False, "error": "要传 {text}"})
             return self._send(200, {"ok": True, "result": channel_send(text),
                                     "channels": channels_status()})
+        if path == "/analysis":
+            # 分析出口的**写入端**：说话层（本机，持有模型 key）把 AI 分析结果推进来
+            # → 先按 docs/analysis.schema.json **硬校验**（不合规拒收）→ 落库 + 分发到数据出口
+            #   ?validate=1 只干跑不落库（写端先自查）
+            _vo = str((q.get("validate") or ["0"])[0]).lower() in ("1", "true", "yes")
+            return self._send(200, analysis_ingest(self._body(), self._client(), validate_only=_vo))
         if path == "/push/test":
             return self._send(200, {"ok": True, "result": channel_test(), "channels": channels_status()})
         if path == "/push/register":
@@ -4289,6 +4811,8 @@ class Handler(BaseHTTPRequestHandler):
                 "rules": {"class_remind_minutes": _r.get("class_remind_minutes"),
                           "sit_continuous_minutes": _r.get("sit_continuous_minutes")},
                 "uptime_note": "hub 在跑", "endpoints": ["/consent", "/ack",
+                                                         "/analysis",
+                                                         "/analysis/schema",
                                                          "/api/mcu",
                                                          "/api/pair",
                                                          "/audit",

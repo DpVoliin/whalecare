@@ -395,6 +395,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, self._devices())
         if path == "/channels":
             return self._send(200, channels_status())
+        if path == "/analysis":
+            # 分析出口（**数据出口**）：拉最近 N 份 AI 分析结果 —— 没配 webhook/文件也能用
+            return self._send(200, analysis_view(q))
+        if path == "/analysis/schema":
+            # 数据格式规范**本身**（机器可读）—— 消费者不必去翻仓库，直接拿这份
+            return self._send(200, json.loads(ANALYSIS_SCHEMA_JSON))
         if path == "/remind":
             with db() as c:
                 rows = c.execute("SELECT * FROM scheduled WHERE fired_at IS NULL "
@@ -557,6 +563,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"ok": False, "error": "要传 {text}"})
             return self._send(200, {"ok": True, "result": channel_send(text),
                                     "channels": channels_status()})
+        if path == "/analysis":
+            # 分析出口的**写入端**：说话层（本机，持有模型 key）把 AI 分析结果推进来
+            # → 先按 docs/analysis.schema.json **硬校验**（不合规拒收）→ 落库 + 分发到数据出口
+            #   ?validate=1 只干跑不落库（写端先自查）
+            _vo = str((q.get("validate") or ["0"])[0]).lower() in ("1", "true", "yes")
+            return self._send(200, analysis_ingest(self._body(), self._client(), validate_only=_vo))
         if path == "/push/test":
             return self._send(200, {"ok": True, "result": channel_test(), "channels": channels_status()})
         if path == "/push/register":
@@ -675,6 +687,8 @@ class Handler(BaseHTTPRequestHandler):
                 "rules": {"class_remind_minutes": _r.get("class_remind_minutes"),
                           "sit_continuous_minutes": _r.get("sit_continuous_minutes")},
                 "uptime_note": "hub 在跑", "endpoints": ["/consent", "/ack",
+                                                         "/analysis",
+                                                         "/analysis/schema",
                                                          "/api/mcu",
                                                          "/api/pair",
                                                          "/audit",

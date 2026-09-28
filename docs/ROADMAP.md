@@ -9,7 +9,7 @@
 - [x] HTTP + SQLite + 规则引擎 + 脱敏 + 定点提醒 + 简报 + 状态页
 - [x] **代码模块化**：`hub/src/whalecare/` 片段 + `build_single.py` 合并成单文件（CI 断言**字节等价**）
 - [x] **schema 迁移框架**：`PRAGMA user_version` + 有序迁移链（每个迁移幂等、失败不让中枢起不来）；
-      当前 **v5**，`hubctl schema` 看版本与待跑迁移
+      当前 **v7**，`hubctl schema` 看版本与待跑迁移
 - [x] **数据主权端点**：`/export`（GDPR Art.20）· `/erase`（Art.17，需 confirm）
 - [x] **可选 Docker 部署**：`Dockerfile` + `docker-compose.yml`（主线仍是"一个文件 + 一条命令"）
 
@@ -124,6 +124,7 @@
 | v0.1.20 | **PyPI 上线**（pip 可装）· 补齐 5 项工程欠账（含 `/health` 接口列表自动化：首跑就抓出漏了 22 条路由） |
 | v0.1.21 | 直发出口加 **ntfy + Bark** · 出口测试用真 HTTP 桩抓实际字节断言格式 |
 | v0.1.22 | 直发出口再加 **钉钉 + Discord + QQ（官方机器人 API）**；README 中英双语同步 8 个出口 |
+| v0.2.0 | **第 9 个出口：分析出口（数据出口）** —— 让 AI 分析数据后输出**结构化数据**而不是句子；配套**数据格式规范**（JSON Schema + 人读文档）并做成中枢侧**硬门禁**（不合规拒收）· `analyses` 表（schema v7） |
 
 ### 外部评审 v3 条目落实情况（2026-09-22）
 

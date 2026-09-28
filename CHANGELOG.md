@@ -1,3 +1,48 @@
+## v0.2.0 — 2026-09-28
+
+### 新增
+- **第 9 个出口：分析出口（数据出口）** —— 让 AI 分析处理数据，然后把**分析结果本身**发出去，
+  **而不是句子**。前 8 个出口发的都是"话"（给人看、有语气和称呼）；这一个发的是**结构化数据**
+  （指标现值 / 趋势 / 异常 / 共变 / 评分 / 标签），给**机器**消费：自己的看板、脚本、挂件、设备。
+  - 配置：`channels.analysis_webhook`（POST 一份 JSON）/ `channels.analysis_file`（原子落文件，
+    先 `.tmp` 再 `os.replace`，读方永远看不到半个文件）/ `channels.analysis_keep`（库里留几份，默认 50）。
+    两个出口都不配也能用 —— 分析照样入库，消费者自己拉 `GET /analysis?limit=N`。
+  - 接口：`POST /analysis`（写入）/ `GET /analysis`（拉最近 N 份）/ `GET /analysis/schema`（取格式规范）
+    / `POST /analysis?validate=1`（干跑自查）；命令行 `hubctl analysis [-n N] [--json]`。
+  - 落库：新表 `analyses`（`schema v6 → v7`，迁移 `_mig_007_analysis_out`，只存分析结果本身）。
+  - 分工：**AI 分析在说话层跑**（`speaker/whale_analyze.py`，模型 key 只在本机 ——
+    中枢的红线是不持有任何 key），中枢负责**校验 + 落库 + 分发**。
+- **分析数据格式规范（v1）** —— [`docs/analysis.schema.json`](docs/analysis.schema.json)
+  （JSON Schema 2020-12）+ 人读版 [`docs/ANALYSIS-FORMAT.md`](docs/ANALYSIS-FORMAT.md)。
+  不是"文档里写一句请遵守"，而是**机制**：
+  - 中枢**自带规范原文**（单文件分发也要能独立校验），`GET /analysis/schema` 直接把它发给消费者；
+    嵌入副本与仓库文档漂移 → `tests/test_analysis_schema.py` 立刻红。
+  - `POST /analysis` **硬校验**（零依赖实现）：不合规 → **拒收**（不落库、不分发）+ 写 `analysis_reject` 审计。
+    两条刻意设计：**标签不许含句读**（防止"数据出口悄悄退化成聊天"）、**指标 id 必须与中枢
+    `llm_context()` 的键逐字相同**（可溯源；允许中文，游戏名/分类名本身就是合法键）。
+  - 规范文档里的 `examples` 会被测试当**教具**真校验 —— 示例写错比不写更糟。
+- **说话层写端 `speaker/whale_analyze.py`** —— 只吃 `/llm-preview` 那份**脱敏上下文**（不另开数据源，
+  分析出口不会变成绕过脱敏的第二条管道）；模型被明令**不许写句子**；产物先被收进规范
+  （不在上下文里的指标 id 丢掉并记账、数值对不上标 `unverified=true`、标签统一裁短），
+  再**干跑中枢校验器**，不合规就把错误列表**回喂模型重写一次**，两次都不合规就**不发**
+  （宁可不发，不发脏数据）。模型调用复用说话层那套（同一份 config、同一套模型画像与备用模型链）。
+- `/health` 的接口列表补上 `/analysis` 与 `/analysis/schema`（列表现 41 个端点）。
+
+### 修复
+- **`analysis_payload` 引用了一个已删除的常量**（`ANALYSIS_SCHEMA`）→ 所有分发路径都会 `NameError`。
+  测试当场抓到；顺手把信封里的格式版本号改成**从规范本身读**（`ANALYSIS_SCHEMA_VERSION`），
+  不手工写第二遍。
+- **写端标签清洗与规范口径不一致**（写端只去句读、规范也只看句读，但测试按"还要去括号"断言）→
+  统一为规范的写法：**标签只禁句读与换行**（括号属于正常短标签，如 `作息规律（周）`）。
+
+### 测试
+- 新增 `tests/test_analysis_schema.py`（41 条）：规范单源一致、逐条打脏输入（缺 `v` / 版本不对 /
+  多余顶层键 / 句子标签 / 超长标签 / 枚举越界 / id 带空格 / 中文 id 放行 / 数值带单位 / `rho` 越界 /
+  `n=0` / 分数越界 / 条数上限 / 数组里多字段）、拒收时**不落库不分发**且写审计、干跑不落库、
+  原子落文件不留 `.tmp`、`analysis_keep` 裁剪、写端收敛逻辑（不可溯源的丢、值标 `unverified`、
+  枚举收敛、顶级多余键丢），以及**真起 HTTP 打路由**（`/analysis`、`/analysis/schema`、`?validate=1`）。
+- 仓库测试 176 → **217 条**。
+
 ## v0.1.27 — 2026-09-27
 
 ### 修复

@@ -1297,7 +1297,7 @@ def topic_kind(text: str) -> str:
 def _log_decision(kind: str, gap_sec: float, reason: str, material: int, st: dict) -> None:
     """结构化决策日志：把"为什么这么决定"发到中枢落库（回放器靠它）。"""
     try:
-        import whale_adapt as _wa          # band_key() 在 whale_adapt 里
+        import whale_adapt as _wa  # band_key() 在 whale_adapt 里
         band = _wa.band_key()
     except Exception:
         band = ""

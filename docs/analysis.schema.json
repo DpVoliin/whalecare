@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/DpVoliin/whalecare/blob/main/docs/analysis.schema.json",
+  "title": "whalecare 分析出口 · 数据格式",
+  "description": "分析出口（第 9 个出口）的 payload 里 analysis 字段的规范格式。中枢在 POST /analysis 时按本文件**硬校验**，不符合直接拒收。人读版说明见 docs/ANALYSIS-FORMAT.md。",
+  "version": 1,
+  "type": "object",
+  "required": ["v"],
+  "additionalProperties": false,
+  "$defs": {
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 24,
+      "pattern": "^[^。，！？；：、\\n\\r]*$",
+      "description": "短标签：≤24 字，且不含句读 —— 数据出口不装句子"
+    },
+    "metric_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 48,
+      "pattern": "^[^\\s。，！？；：、\"'（）()\\[\\]【】{}<>《》/\\\\|]+$",
+      "description": "指标 id：必须与中枢 llm_context 里的键**逐字相同**（点号路径或叶子键都认）。允许中文（如游戏名/分类名），但不含空白、句读、引号与括号 —— 它是标识符，不是文本"
+    },
+    "conf": {
+      "enum": ["low", "mid", "high"],
+      "description": "置信度；样本天数 n < 5 时必须为 low"
+    }
+  },
+  "properties": {
+    "v": {
+      "const": 1,
+      "description": "格式版本。本文件即 v1；破坏性改动必须升版本，读方应拒收不认识的 v"
+    },
+    "day": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "这份分析针对哪一天（本地时区）"
+    },
+    "values": {
+      "type": "array",
+      "maxItems": 40,
+      "description": "指标现值（只放上下文中真实存在的指标）",
+      "items": {
+        "type": "object",
+        "required": ["id", "v"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/metric_id" },
+          "v": { "type": "number" },
+          "unit": { "$ref": "#/$defs/label" },
+          "unverified": {
+            "type": "boolean",
+            "description": "true = 该数值无法与上下文直接对上（派生值/换算值）。写端应尽力核对，读端应把它当弱证据"
+          }
+        }
+      }
+    },
+    "trends": {
+      "type": "array",
+      "maxItems": 40,
+      "description": "趋势（相对基线）。方向必须由数值算出，不是形容",
+      "items": {
+        "type": "object",
+        "required": ["id", "dir"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/metric_id" },
+          "dir": { "enum": ["up", "down", "flat"] },
+          "delta_pct": { "type": "number", "description": "相对变化百分比（+12 = 涨 12%）" },
+          "vs": { "$ref": "#/$defs/label", "description": "基线是什么（如 7日均值）" },
+          "conf": { "$ref": "#/$defs/conf" }
+        }
+      }
+    },
+    "outliers": {
+      "type": "array",
+      "maxItems": 40,
+      "description": "异常点。z 是标准分，不是主观判断",
+      "items": {
+        "type": "object",
+        "required": ["id", "side"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/metric_id" },
+          "side": { "enum": ["high", "low"] },
+          "z": { "type": "number" },
+          "conf": { "$ref": "#/$defs/conf" }
+        }
+      }
+    },
+    "pairs": {
+      "type": "array",
+      "maxItems": 20,
+      "description": "两指标的共变关系。n 是样本天数，必须给 —— 没有 n 的相关系数是耍流氓",
+      "items": {
+        "type": "object",
+        "required": ["a", "b"],
+        "additionalProperties": false,
+        "properties": {
+          "a": { "$ref": "#/$defs/metric_id" },
+          "b": { "$ref": "#/$defs/metric_id" },
+          "rho": { "type": "number", "minimum": -1, "maximum": 1 },
+          "n": { "type": "integer", "minimum": 1 },
+          "conf": { "$ref": "#/$defs/conf" }
+        }
+      }
+    },
+    "scores": {
+      "type": "array",
+      "maxItems": 20,
+      "description": "派生评分（0~of 的整数分制）。自定义名字用短标签，不得含句读",
+      "items": {
+        "type": "object",
+        "required": ["id", "v"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/label" },
+          "v": { "type": "number", "minimum": 0, "maximum": 100 },
+          "of": { "type": "number", "minimum": 1, "description": "满分，默认 100" }
+        }
+      }
+    },
+    "tags": {
+      "type": "array",
+      "maxItems": 12,
+      "description": "状态标签（短词，如 睡眠不足 / 久坐）。读端用来做筛选与着色",
+      "items": { "$ref": "#/$defs/label" }
+    },
+    "notes": {
+      "type": "array",
+      "maxItems": 6,
+      "description": "数据侧的说明（**不是**给她/给人的嘱咐）。缺数据、口径变化等",
+      "items": { "$ref": "#/$defs/label" }
+    }
+  },
+  "examples": [
+    {
+      "v": 1,
+      "day": "2026-09-28",
+      "values": [
+        { "id": "screen_active_minutes", "v": 554, "unit": "min" },
+        { "id": "sleep_minutes", "v": 420, "unit": "min" }
+      ],
+      "trends": [
+        { "id": "screen_active_minutes", "dir": "up", "delta_pct": 14, "vs": "7日均值", "conf": "mid" }
+      ],
+      "outliers": [
+        { "id": "screen_active_minutes", "side": "high", "z": 2.1, "conf": "mid" }
+      ],
+      "pairs": [
+        { "a": "game_minutes", "b": "screen_active_minutes", "rho": 0.62, "n": 9, "conf": "mid" }
+      ],
+      "scores": [
+        { "id": "作息规律", "v": 72, "of": 100 }
+      ],
+      "tags": ["睡眠不足", "久坐"],
+      "notes": ["心率今日缺"]
+    }
+  ]
+}

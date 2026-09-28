@@ -68,7 +68,7 @@ except OSError:
     pass
 CFG_PATH = os.path.join(BASE, "hub.json")
 DB_PATH = os.path.join(BASE, "hub.db")
-VERSION = "0.1.27"
+VERSION = "0.2.0"
 TZ = timezone(timedelta(hours=8))          # 北京时间（用户在国内，固定 +8，避免服务器 UTC 漂移）
 
 DEFAULT_CFG = {
@@ -121,6 +121,15 @@ DEFAULT_CFG = {
         "wecom_touser": "@all",
         # 通用出口：任何接受 POST {"text": "..."} 的地址（自建转发服务 / Slack-Discord 中转）
         "generic_webhook": "",
+        # ── 第 9 个出口：**分析出口**（数据出口，v0.2.0）────────────────────────
+        #   上面 8 个发的都是「话」（自然语言，给人看）；这个发的是 **AI 分析后的结构化数据**
+        #   （JSON），给**机器**消费 —— 你自己的看板 / 脚本 / 挂件 / 设备。
+        #   所以它**不做任何文本包装**：不拼问候、不句化、不加"鲸鲸说"。
+        #   AI 分析在**说话层**跑（模型 key 只在本机，中枢红线是不持有 key），
+        #   结果 POST /analysis 进来 → 落库（analyses 表）+ 从这里分发出去。
+        "analysis_webhook": "",       # POST {"type":"analysis","schema":1,...} 到任意地址
+        "analysis_file": "",          # 或落一个 JSON 文件（原子写：先 .tmp 再 replace）给挂件/网页/设备读
+        "analysis_keep": 50,          # 库里保留最近 N 次分析（0 = 不裁剪）
     },
     "privacy": {
         # 哪些分类**值得拿出来说**（其余如 学习/办公/工具/其他 一律不提）

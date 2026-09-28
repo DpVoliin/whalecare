@@ -28,7 +28,7 @@ hub/src/whalecare/          ← 你改这里（15 个片段，数字前缀 = 合
                       │
                       │  hub/tools/build_single.py   ← 机械合并（按文件名前缀排序）
                       ▼
-hub/hub.py                 ← 生成产物（约 4,400 行），**必须提交**
+hub/hub.py                 ← 生成产物（约 5,400 行），**必须提交**
 hub/dist/hub.py            ← 合并中间产物，**不进 git**
 ```
 

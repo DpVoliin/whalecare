@@ -365,7 +365,7 @@ def db():
 # 失败也不会让中枢起不来（报出来 + `hubctl schema` 能看出落在哪一版）。
 # 硬要求：**每个迁移都必须幂等**（IF NOT EXISTS / 先查再加列）—— 老库 user_version=0
 # 但表已存在，会被当成"从头跑一遍"，不幂等就会炸。
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _MIGRATIONS = []
 
 
@@ -842,6 +842,31 @@ def _mig_006_throttle_and_consent(conn):
         note TEXT DEFAULT ''
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_consents_what ON consents(what, id)")
+
+
+@migration
+def _mig_007_analysis_out(conn):
+    """v7：「分析出口」的落库 = 数据出口的发件箱（v0.2.0）。
+
+    为什么这个出口要落库、而 8 个文本出口不用：
+      文本出口发的是「话」，发完就过去了（要不要留痕由 reminders/episodes 管）。
+      分析出口发的是**结构化数据**，它有三个额外需求：
+        ① 挂件 / 网页 / 设备要能随时**拉最近一次**（不用一直挂着 webhook）；
+        ② 要能看出这份分析是**什么时候、谁产的**（模型名），否则数字对不上没人知道为什么；
+        ③ 一份分析可能要**发给多个消费者**（webhook + 文件），落库是唯一真相。
+
+    只存分析结果本身（它已经是脱敏后的聚合/派生数据），**不存原始通知与原文**。
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS analyses(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,        -- 产出时刻（ISO）
+            day TEXT DEFAULT '',     -- 这份分析针对哪一天
+            engine TEXT DEFAULT '',  -- 谁产的（模型名 / 脚本名），用于对账
+            data TEXT NOT NULL       -- 分析结果 JSON（结构化数据，不是句子）
+        );
+        CREATE INDEX IF NOT EXISTS idx_analyses_ts ON analyses(ts DESC);
+    """)
 
 
 AUTH_LIMIT = 5            # 窗口内允许的失败次数

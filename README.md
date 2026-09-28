@@ -102,7 +102,7 @@ curl -s -H "X-Token: $TOKEN" http://127.0.0.1:11440/llm-preview | head -40
 |---|---|
 | `hub/hub.py` | 中枢：单文件 Python（零第三方依赖），HTTP + SQLite + 规则引擎 + 脱敏 + 定点提醒 |
 | `hub/hubctl.py` | 命令行工具：读数据 / 只读 SQL / 导出（可脱敏）/ 合并导入 / 备份还原 / **审计 `audit`** / **配对码 `pair`** / **schema 版本 `schema`**（v4 起有迁移框架）|
-| `hub/src/whalecare/93_channels.py` | **直发出口（8 个）**：企业微信/通用 webhook/ntfy/Bark/钉钉/Discord/QQ 官方机器人；不自动使用，不依赖 Hermes 网关 |
+| `hub/src/whalecare/93_channels.py` | **直发出口（9 个）**：企业微信/通用 webhook/ntfy/Bark/钉钉/Discord/QQ 官方机器人（**文本**）+ **分析出口**（发 AI 分析后的**数据**，不是句子）；不自动使用，不依赖 Hermes 网关 |
 | `speaker/whale_strategy.example.py` | **说话策略外挂**：复制成 `whale_strategy.py` 即可替换节奏与料分 |
 | `GET /`（管理台） | **Web 管理台**：标准库 HTML，零前端依赖。看数据源健康度/决策/审计，改开关与人设，生成配对码。与 API **同一套 token** |
 | `hub/hub_install.sh` | 部署脚本：只放文件 + 写 cron，靠**文件指纹变化热重启**（永不需 kill 进程）|
@@ -125,6 +125,7 @@ curl -s -H "X-Token: $TOKEN" http://127.0.0.1:11440/llm-preview | head -40
 | `docs/ARCHITECTURE.md` | **架构与设计取舍**（含「哪些机制是被真故障咬出来的」）|
 | `docs/DEPLOY-GUIDE.md` | 部署教程：权限逐条 + 常见报错对照表 |
 | `docs/DEMO-SCRIPT.md` | 演示脚本（录视频/给别人看时照着走）|
+| `docs/ANALYSIS-FORMAT.md` + `docs/analysis.schema.json` | **分析出口的数据格式规范**（人读版 + 机器可校验的 JSON Schema；中枢按它硬校验）|
 | `docs/FDROID.md` · `docs/AWESOME-SUBMISSIONS.md` | 上架/投稿材料（F-Droid、awesome-selfhosted）|
 | `docs/` | 其余：隐私设计、本地优先、路线图、扩展契约、单片机、schema |
 
@@ -317,9 +318,9 @@ python3 whale_speaker.py       # 常驻：定点提醒照发；其余时间自�
 
 ## 直发出口（除微信外还能发到哪）
 
-主出口是「说话层 → 网关 webhook → 微信」。中枢另外自带 **8 个直发出口**（**不自动使用** ——
-避免和说话层重复推送，由 cron / 扩展 / 你手动调）—— 其中 6 个走各自平台的**官方接口**，
-QQ 走**官方机器人 API**，全部零第三方依赖：
+主出口是「说话层 → 网关 webhook → 微信」。中枢另外自带 **9 个直发出口**（**不自动使用** ——
+避免和说话层重复推送，由 cron / 扩展 / 你手动调）。其中 **8 个是文本出口**（发"话"，给人看），
+第 9 个是**数据出口**（发 AI 分析出来的**结构化数据**，给机器看）—— 全部零第三方依赖：
 
 | 出口 | 配置键 | 说明 |
 |---|---|---|
@@ -331,9 +332,44 @@ QQ 走**官方机器人 API**，全部零第三方依赖：
 | **钉钉** | `channels.dingtalk_webhook` (+`dingtalk_secret`) | 官方自定义机器人，可选官方加签 |
 | **Discord** | `channels.discord_webhook` | 官方 webhook，`{"content": ...}`，单条 2000 字内 |
 | **QQ** | `channels.qq_appid` + `qq_secret` + `qq_target` (+`qq_kind`) | **官方机器人 API**（先取 access_token 再发，不装 SDK）|
+| **分析出口**（数据） | `channels.analysis_webhook` / `analysis_file` | 见下节 —— 发**数据**不发句子 |
 
 看状态：`hubctl channels`（只报"配没配"，不打印地址本身 —— 那带密钥）。
 发测试：`POST /channels?test=1`。
+
+### 第 9 个出口：分析出口（发数据，不发句子）
+
+前 8 个出口发的是**话**（自然语言、有语气和称呼）。分析出口发的是**让 AI 分析处理数据之后的结果**
+—— 结构化 JSON（指标现值 / 趋势 / 异常 / 共变 / 评分 / 标签），**不做任何话术包装**，
+给**机器**消费：你自己的看板、脚本、桌面挂件、单片机都行。
+
+```
+中枢 /llm-preview（已脱敏）
+   └─▶ 说话层 whale_analyze.py：让模型把数据**算成 JSON**（明令禁止写句子）
+          └─▶ 收进规范 + 干跑中枢校验器 → POST /analysis
+                 └─▶ 中枢按规范**硬校验**：不合规拒收；合规则落库 + 分发
+                        ├─ channels.analysis_webhook（POST 一份 JSON 给你的服务）
+                        ├─ channels.analysis_file（原子落一个 .json 给挂件/网页/设备读）
+                        └─ GET /analysis?limit=N（消费者自己拉，不配出口也能用）
+```
+
+**格式是规范，不是"尽力而为"**：[`docs/analysis.schema.json`](docs/analysis.schema.json)
+（JSON Schema 2020-12，人读版 [`docs/ANALYSIS-FORMAT.md`](docs/ANALYSIS-FORMAT.md)）。
+中枢**自带一份副本**并在 `POST /analysis` 上硬校验：不合规 → **拒收**（不落库、不分发）+ 写审计。
+另有两个辅助接口：`GET /analysis/schema` 取规范本身，`POST /analysis?validate=1` 干跑自查。
+
+三条硬规矩（都做成了机制，不靠自觉）：
+
+| 规矩 | 怎么做 |
+|---|---|
+| **只吃脱敏上下文** | 分析只读 `/llm-preview` 那份（不含通知原文 / App 名 / 分钟级时间 / 定位），不另开数据源 |
+| **不许编数据** | 指标 `id` 必须能在上下文里找到（找不到就丢并记账）；数值对不上上下文 → 标 `unverified=true`（宁标未查到，不编造）|
+| **不许写句子** | 字符串只能是短标签（≤24 字、不含句读）；规范硬校验会拦，写端还会**回喂错误重写一次**，两次都不合规就**不发** |
+
+命令行走一遍：`python3 speaker/whale_analyze.py --now`（跑一次并发送）、`--dry`（只分析不发送）、
+`--show -n 3`（看中枢里最近 3 份）、`--schema`（打印规范）。中枢侧：`hubctl analysis`。
+
+> 分析出口**不占用**她说话的额度、也不影响提醒节奏 —— 它只往外送数据。
 
 ## 部署：一条命令
 
