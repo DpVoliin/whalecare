@@ -24,6 +24,13 @@ runtime dependency, local-first, auditable). 自托管 · 本地优先 · 零依
 pip install whalecare && whalecare
 ```
 > 装出来的就是那份单文件中枢本身（包壳只做定位与转发，不改一行逻辑）。
+>
+> ⚠️ **国内网络注意**：如果你用的是国内 PyPI 镜像（很多云主机默认就走镜像），
+> 镜像同步官方 PyPI **有几小时延迟**（实测：官方已发 0.1.27 时，腾讯云镜像还停在 0.1.25）。
+> 所以"`pip` 说找不到最新版"通常不是没发布，而是镜像还没拉过来 ✓ 想立刻装最新版就显式指官方源：
+> ```bash
+> pip install -i https://pypi.org/simple whalecare
+> ```
 
 **从源码跑**：
 ```bash

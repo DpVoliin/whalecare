@@ -86,6 +86,14 @@ Then open `http://127.0.0.1:11440/llm-preview` — that's what the model would s
 
 Prefer a container? `docker compose up -d` (data stays in `./data`).
 Prefer pip? **`pip install whalecare && whalecare`** — published on PyPI, zero dependencies;
+>
+> ⚠️ **If you are on a China-based PyPI mirror** (many cloud hosts default to one):
+> mirrors lag the official PyPI by **a few hours**. Seeing "no matching distribution" for the
+> newest tag usually means the mirror hasn't caught up yet — not that the release is missing.
+> Pin the official index to get it immediately:
+> ```bash
+> pip install -i https://pypi.org/simple whalecare
+> ```
 the package is a thin shell that just locates and runs the same single-file hub.
 
 Optional pieces: `hubctl.py` (CLI: status/stats/dump/restore/doctor/token/…),
