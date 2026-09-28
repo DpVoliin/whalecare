@@ -156,6 +156,46 @@ python3 -c "import json,jsonschema;jsonschema.validate(json.load(open('my-analys
 
 命令行看结果：`hubctl analysis`（最近一份）/ `hubctl analysis -n 5 --json`（给脚本用）。
 
+## 定时跑（每天一次）
+
+分析不必手动点。有两种跑法，按"谁来消费"选：
+
+```bash
+# ① 手动跑一次：分析 + 入库（+ 分发到已配置的出口）
+python3 speaker/whale_analyze.py --now
+
+# ② 只打印**一屏数据**（通知 / 日志用；仍然不写句子，只是排版）
+python3 speaker/whale_analyze.py --now --digest
+
+# ③ stdout 只留数据、进度走 stderr —— cron 用这个，整段输出可以直接当消息发出去
+python3 speaker/whale_analyze.py --now --digest --quiet
+```
+
+`--digest` 长这样（真实输出，一行一组，没有称呼也没有建议）：
+
+```
+2026-09-28 · deepseek-v4.1-flash
+values: tracks_today_count=29count · screen_total_minutes_today=285min · weather_now.humidity=56percent
+scores: 屏幕娱乐占比 94/100 · 数据完整度 35/100
+tags: 晴 · 高温 · 上课日 · 数据缺失 · 短视频为主
+notes: 电脑源今日无上报 · 手机源仅39条上报 · 仅单日数据无法算趋势与相关
+```
+
+**cron 一行**（放在**跑说话层的那台机器**上 —— 模型 key 在那儿）：
+
+```cron
+40 22 * * * cd /home/ubuntu/.hermes/scripts && . ./.whale_env && python3 whale_analyze.py --now --digest --quiet >> /tmp/whale_analyze.log 2>&1
+```
+
+**退出码**：0 = 成功入库；非 0 = 这一轮没成（模型没返回 / 两次都不符合规范）/ 进程异常 ——
+所以把它当**看门狗**用：只在出错时才需要报警，正常时它会照常打一屏数据。
+
+**定时跑的三条注意**：
+1. **它不占说话额度、也不影响提醒节奏** —— 分析出口与说话层是两条独立的路（同一份脱敏上下文）。
+2. 想让它产出的数据被别的程序消费，配置 `channels.analysis_file`（原子写 JSON）或
+   `channels.analysis_webhook`；不配也能用，消费者自己拉 `GET /analysis`。
+3. 每次跑会调一次模型（一次调用，token 量很小）；不需要每天跑就改成每周，别让它空转。
+
 ## 配置出口
 
 ```jsonc

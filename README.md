@@ -367,7 +367,8 @@ python3 whale_speaker.py       # 常驻：定点提醒照发；其余时间自�
 | **不许写句子** | 字符串只能是短标签（≤24 字、不含句读）；规范硬校验会拦，写端还会**回喂错误重写一次**，两次都不合规就**不发** |
 
 命令行走一遍：`python3 speaker/whale_analyze.py --now`（跑一次并发送）、`--dry`（只分析不发送）、
-`--show -n 3`（看中枢里最近 3 份）、`--schema`（打印规范）。中枢侧：`hubctl analysis`。
+`--digest`（只打印**一屏数据**，cron/通知用）、`--show -n 3`（看中枢里最近 3 份）、`--schema`（打印规范）。
+中枢侧：`hubctl analysis`。定时跑的 cron 一行见 [`docs/ANALYSIS-FORMAT.md`](docs/ANALYSIS-FORMAT.md)。
 
 > 分析出口**不占用**她说话的额度、也不影响提醒节奏 —— 它只往外送数据。
 

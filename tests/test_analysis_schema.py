@@ -12,6 +12,7 @@
   ④ 路由层（`/analysis`、`/analysis/schema`）**真起 HTTP 打一遍**：
      函数级测试抓不到"路由挂错分支"（`/consent` 那次就是这么翻车的）。
 """
+import ast
 import contextlib
 import importlib.util
 import io
@@ -401,6 +402,63 @@ class TestWriterConforms(AnalysisBase):
         clean, _ = self._norm(GOOD)
         self.assertEqual([], self.h.analysis_validate(clean), clean)
 
+    def test_上下文重复行被去重但不丢不同值(self):
+        """★ 实测教训：同一条 `路径=值` 会重复出现多次，模型把它当成"数据有问题"
+        写进 notes（原话：classes.start_hour等键重复出现）。
+        去重只去掉**完全相同的行** —— 不同的值必须保留（那是有信息的）。"""
+        ctx = {"classes": [{"start_hour": 8}, {"start_hour": 8}, {"start_hour": 14}],
+               "games": {"明日方舟": 72}}
+        _, _, lines = self.wr.flatten(ctx)
+        self.assertEqual(len(lines), len(set(lines)), "flatten 必须去重：%s" % lines)
+        self.assertEqual(sum(1 for x in lines if x == "classes.start_hour=8"), 1, "完全相同的行只留一条")
+        self.assertIn("classes.start_hour=14", lines, "不同的值不许被顺手删掉")
+
+
+class TestDigest(AnalysisBase):
+    """`--digest` 是定时任务/通知要发的**一屏数据** —— 它也不许退化成句子。"""
+
+    REC = {"engine": "m", "audit": {}, "analysis": {
+        "v": 1, "day": "2026-09-28",
+        "values": [{"id": "screen_active_minutes", "v": 554.0, "unit": "min"}],
+        "trends": [{"id": "screen_active_minutes", "dir": "up", "delta_pct": 14.0, "vs": "7日均值"}],
+        "outliers": [{"id": "screen_active_minutes", "side": "high", "z": 2.1}],
+        "pairs": [{"a": "game_minutes", "b": "screen_active_minutes", "rho": 0.62, "n": 9}],
+        "scores": [{"id": "作息规律", "v": 72.0, "of": 100.0}],
+        "tags": ["久坐"], "notes": ["心率今日缺"]}}
+
+    def setUp(self):
+        super().setUp()
+        self.wr = load_writer()
+
+    def test_只出数据不出句子(self):
+        s = self.wr.digest(self.REC)
+        self.assertNotIn("。", s)
+        self.assertNotIn("，", s)
+        self.assertNotIn("！", s)
+        for k in ("values:", "trends:", "outliers:", "pairs:", "scores:", "tags:", "notes:"):
+            self.assertIn(k, s, "摘要里该有 %s" % k)
+        self.assertLessEqual(len(s.splitlines()), 10, "一屏数据，别铺开")
+
+    def test_方向与数值有符号(self):
+        s = self.wr.digest(self.REC)
+        self.assertIn("↑14%", s)
+        self.assertIn("rho=0.62", s)
+        self.assertIn("n=9", s)
+        self.assertIn("554min", s)
+        self.assertNotIn("554.0", s, "整数不该带小数点")
+
+    def test_空分析不炸(self):
+        s = self.wr.digest({"analysis": {}, "engine": ""})
+        self.assertEqual(len(s.splitlines()), 1)
+
+    def test_不可溯源与未核对会标出来(self):
+        rec = json.loads(json.dumps(self.REC))
+        rec["analysis"]["values"][0]["unverified"] = True
+        rec["audit"] = {"dropped_items": ["values:编造"]}
+        s = self.wr.digest(rec)
+        self.assertIn("unverified: 1", s)
+        self.assertIn("丢弃(不可溯源): 1", s)
+
 
 class TestCli(AnalysisBase):
     """`hubctl analysis` 是给人和脚本看数据的入口 —— 形状错了外面就解析不了。"""
@@ -441,6 +499,128 @@ class TestCli(AnalysisBase):
         with contextlib.redirect_stdout(buf):
             ctl.cmd_analysis(A())
         self.assertIn("还没有分析结果", buf.getvalue())
+
+
+class FakeSpeaker:
+    """假说话层：不碰模型、不碰网络 —— 只喂一段固定 JSON 并记账。
+
+    为什么要它能替身：`run_once()` 的**打印与重试路径**恰恰是真跑才暴露 bug 的地方
+    （2026-09-28 实测两处：`print`→`say` 时漏了 `flush=True` 关键字、摘要在 `--quiet` 下被写进 stderr）。
+    函数级测试抓不到这类错，因为它藏在"把结果送出去"那几行里。
+    """
+
+    CTX = {"screen_active_minutes": 480, "sleep": {"minutes_rounded": 390},
+           "games_minutes_today": {"明日方舟": 72}}
+
+    def __init__(self, obj, valid=True):
+        self.obj = obj
+        self.valid = valid
+        self.calls = []
+        self.CONFIG = pathlib.Path("/nonexistent/config.yaml")   # → 模型名回落 unknown
+
+    def llm(self, messages, **kw):
+        self.calls.append(("llm", kw.get("max_tokens")))
+        return json.dumps(self.obj, ensure_ascii=False)
+
+    def hub(self, path, payload=None):
+        self.calls.append(("hub", path, payload))
+        if path.startswith("/llm-preview"):
+            return {"would_send_to_model": self.CTX, "what_model_never_sees": ["通知原文"]}
+        if "validate=1" in path:
+            return {"ok": self.valid, "errors": [] if self.valid else ["tags[0] 要短标签"]}
+        if path == "/analysis":
+            return {"ok": True, "id": 42}
+        return {}
+
+    def _dbg(self, *a, **k):
+        pass
+
+
+OBJ_OK = {"v": 1, "day": "2026-09-28",
+          "values": [{"id": "screen_active_minutes", "v": 480, "unit": "min"}],
+          "scores": [{"id": "屏幕娱乐占比", "v": 94, "of": 100}],
+          "tags": ["久坐"], "notes": ["电脑源今日无上报"]}
+
+
+class TestRunOnce(AnalysisBase):
+    """跑一遍完整流程（假模型、假中枢）—— 打印/重试/静默这几条路必须真走一遍。"""
+
+    def setUp(self):
+        super().setUp()
+        self.wr = load_writer()
+        self.wr.LOCAL_LOG = self.home / ".wa.jsonl"
+
+    def _run(self, fake, **kw):
+        self.wr._speaker = lambda: fake
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rec = self.wr.run_once(**kw)
+        return rec, out.getvalue(), err.getvalue()
+
+    def test_摘要在stdout_进度在stderr(self):
+        fake = FakeSpeaker(OBJ_OK)
+        self.wr.QUIET[0] = True
+        try:
+            rec, out, err = self._run(fake, do_post=True, do_digest=True)
+        finally:
+            self.wr.QUIET[0] = False
+        self.assertTrue(rec)
+        self.assertIn("values:", out, "★ 摘要必须出现在 stdout —— cron 只接 stdout")
+        self.assertIn("screen_active_minutes=480min", out)
+        self.assertNotIn("上下文", out, "进度行不该混进 stdout")
+        self.assertIn("上下文", err, "进度行应该走 stderr")
+        self.assertEqual(len([c for c in fake.calls if c[0] == "hub" and c[1] == "/analysis"]), 1)
+
+    def test_不合规会回喂重写一次_再不合规就不发(self):
+        fake = FakeSpeaker(OBJ_OK, valid=False)
+        rec, out, err = self._run(fake, do_post=True)
+        self.assertIsNone(rec, "两次都不合规 → 不发")
+        self.assertEqual(len([c for c in fake.calls if c[0] == "llm"]), 2, "应当重写一次（共两次调用）")
+        self.assertEqual([c for c in fake.calls if c[0] == "hub" and c[1] == "/analysis"], [],
+                         "★ 不合规的东西一个字都不许发")
+
+    def test_回喂里带上了校验器的错误(self):
+        fake = FakeSpeaker(OBJ_OK, valid=False)
+        self.wr._speaker = lambda: fake
+        sent = []
+        real_llm = fake.llm
+
+        def spy(messages, **kw):
+            sent.append(messages[-1]["content"])
+            return real_llm(messages, **kw)
+
+        fake.llm = spy
+        self.wr.run_once(do_post=True)
+        self.assertIn("不符合格式规范", sent[-1], "第二次调用要把错误列表带回去")
+        self.assertIn("短标签", sent[-1])
+
+    def test_发出去的是规范后的数据(self):
+        fake = FakeSpeaker(dict(OBJ_OK, tags=["久坐"], advice="记得喝水"), valid=True)
+        self.wr._speaker = lambda: fake
+        self.wr.run_once(do_post=True)
+        payload = [c[2] for c in fake.calls if c[0] == "hub" and c[1] == "/analysis"][0]
+        self.assertNotIn("advice", payload["analysis"], "越界的键不许进产物")
+        self.assertIn("tags", payload["analysis"])
+        self.assertEqual(payload["analysis"]["v"], 1)
+
+    def test_dry不发只分析(self):
+        fake = FakeSpeaker(OBJ_OK)
+        rec, out, err = self._run(fake, do_post=False, do_digest=True)
+        self.assertTrue(rec)
+        self.assertIn("values:", out)
+        self.assertEqual([c for c in fake.calls if c[0] == "hub" and c[1] == "/analysis"], [])
+
+
+class TestStaticGuards(AnalysisBase):
+    def test_say不收关键字参数(self):
+        """`say()` 只收位置参数 —— 把 print 改成 say 时最容易漏下 `flush=True`（实测栽过一次）。"""
+        tree = ast.parse((ROOT / "speaker" / "whale_analyze.py").read_text(encoding="utf-8"))
+        bad = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "say":
+                if node.keywords:
+                    bad.append(node.lineno)
+        self.assertEqual([], bad, "这些行的 say() 带了关键字参数：%s" % bad)
 
 
 if __name__ == "__main__":

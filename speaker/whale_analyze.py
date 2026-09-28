@@ -33,6 +33,8 @@
     python3 whale_analyze.py --now --print    # 跑一次，打印结果（仍会发）
     python3 whale_analyze.py --now --dry      # 只分析+校验，不发
     python3 whale_analyze.py --show -n 3      # 看中枢里最近 3 份分析
+    python3 whale_analyze.py --now --digest   # 只打印**一屏数据**（定时任务+通知用这个）
+    python3 whale_analyze.py --now --digest --quiet   # stdout 只留数据，进度走 stderr
 """
 from __future__ import annotations
 
@@ -50,6 +52,13 @@ LOCAL_LOG = BASE / ".whale_analysis.jsonl"      # 本地留痕（最近 20 份�
 LOCAL_KEEP = 20
 
 SCHEMA_URL = "/analysis/schema"                 # 规范（机器可读）由中枢提供
+
+#: --quiet：进度行改走 stderr，stdout 只留数据摘要（定时任务靠这个拿到干净输出）
+QUIET = [False]
+
+
+def say(msg):
+    print(msg, file=sys.stderr if QUIET[0] else sys.stdout)
 
 #: 顶层字段白名单（与规范一致）
 TOP_KEYS = ("v", "day", "values", "trends", "outliers", "pairs", "scores", "tags", "notes")
@@ -84,8 +93,13 @@ PROMPT_SYSTEM = """你是一个**数据分析器**，不是聊天助手，也不
 
 
 def _speaker():
-    """复用 whale_speaker 的 hub()/llm()（同一份模型配置与模型画像适配 —— 不再维护第二套）。"""
+    """复用 whale_speaker 的 hub()/llm()（同一份模型配置与模型画像适配 —— 不再维护第二套）。
+
+    `--quiet` 时把说话层的调试行**改道到 stderr**（不静音，方便排障；只是别污染 stdout 的数据）。
+    """
     import whale_speaker as w
+    if QUIET[0]:
+        w._dbg = lambda *a, **k: print("[speak]", *a, file=sys.stderr, flush=True)
     return w
 
 
@@ -121,7 +135,10 @@ def flatten(ctx):
             lines.append("%s=%s" % (path, node[:24]))
 
     walk(ctx, "")
-    return keys, nums, lines
+    # ★ 去重（2026-09-28 实测）：同一个路径在列表里出现多次（每节课都有 classes.start_hour
+    #   之类），会重复成多行 —— 模型看到重复键会把它当成**数据有问题**写进 notes
+    #   （实测原话："classes.start_hour等键重复出现"）。去重后上下文更干净、也更省 token。
+    return keys, nums, list(dict.fromkeys(lines))
 
 
 # ────────────────────────────── 模型调用 ──────────────────────────────
@@ -300,16 +317,16 @@ def save_local(rec):
         lines.append(json.dumps(rec, ensure_ascii=False))
         LOCAL_LOG.write_text("\n".join(lines[-LOCAL_KEEP:]) + "\n", encoding="utf-8")
     except Exception as e:
-        print("  本地留痕写不进去（不影响发送）：%s" % str(e)[:60], flush=True)
+        say("  本地留痕写不进去（不影响发送）：%s" % str(e)[:60])
 
 
-def run_once(do_post=True, do_print=False, day=None):
+def run_once(do_post=True, do_print=False, do_digest=False, day=None):
     w = _speaker()
     day = day or time.strftime("%Y-%m-%d")
     ctx, never = fetch_context()
     keys, _, lines = flatten(ctx)
-    print("  上下文 %d 个顶层块 · 模型看到 %d 行 · 可用键 %d 个（屏蔽 %d 项）"
-          % (len(ctx), len(lines), len(keys), len(never)), flush=True)
+    say("  上下文 %d 个顶层块 · 模型看到 %d 行 · 可用键 %d 个（屏蔽 %d 项）"
+          % (len(ctx), len(lines), len(keys), len(never)))
 
     hint, clean, rep, model, errs = "", None, {}, "unknown", []
     for attempt in (1, 2):
@@ -317,30 +334,77 @@ def run_once(do_post=True, do_print=False, day=None):
         clean, rep = normalize(obj, ctx)
         errs, ok = spec_check(clean)
         n = sum(len(clean.get(k) or []) for k in ("values", "trends", "outliers", "pairs", "scores"))
-        print("  第 %d 次：模型 %s → 合规 %d 条（丢不可溯源 %d / 丢越界键 %d / 值未对上 %d）规范校验%s"
+        say("  第 %d 次：模型 %s → 合规 %d 条（丢不可溯源 %d / 丢越界键 %d / 值未对上 %d）规范校验%s"
               % (attempt, model, n, len(rep["dropped_items"]), len(rep["dropped_keys"]),
-                 rep["unverified"], "通过 ✓" if ok else "不过 ✗ %d 条" % len(errs)), flush=True)
+                 rep["unverified"], "通过 ✓" if ok else "不过 ✗ %d 条" % len(errs)))
         if ok:
             break
         hint = "\n".join("- " + e for e in errs[:12])
 
     if errs:
-        print("  ✗ 两次都不符合规范，**不发**（宁可不发，不发脏数据）：", flush=True)
+        say("  ✗ 两次都不符合规范，**不发**（宁可不发，不发脏数据）：")
         for e in errs[:8]:
-            print("      - %s" % e, flush=True)
+            say("      - %s" % e)
         return None
 
     rec = {"day": clean.get("day") or day, "engine": model,
            "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "analysis": clean, "audit": rep}
     save_local(rec)
+    if do_digest:
+        # ★ 摘要必须走 **stdout**（`--quiet` 下 say() 是给 stderr 的）—— cron 只接 stdout
+        print(digest(rec), flush=True)
     if do_print:
-        print(json.dumps(clean, ensure_ascii=False, indent=2), flush=True)
+        say(json.dumps(clean, ensure_ascii=False, indent=2))
     if not do_post:
-        print("  --dry：没有发出去", flush=True)
+        say("  --dry：没有发出去")
         return rec
     res = w.hub("/analysis", {"analysis": clean, "engine": model, "day": clean.get("day") or day})
-    print("  已发 /analysis → %s" % json.dumps(res, ensure_ascii=False)[:240], flush=True)
+    say("  已发 /analysis → %s" % json.dumps(res, ensure_ascii=False)[:240])
     return rec
+
+
+def digest(rec):
+    """紧凑的**数据**摘要（一行一组，仍然不写句子）。
+
+    为什么要有它：定时任务（cron）要往外发的是"这次算出了什么"，而不是一大段 JSON ——
+    聊天/通知里塞 5 段缩进 JSON 没人看。这里只做**排版**，不做话术：没有称呼、没有建议、
+    没有连接词，读起来就是一屏数据。（真正的产物仍然是那份规范 JSON，见 --print / GET /analysis）
+    """
+    a = (rec or {}).get("analysis") or {}
+    out = ["%s · %s" % (a.get("day") or "-", (rec or {}).get("engine") or "-")]
+
+    def f(v):
+        return ("%.2f" % v).rstrip("0").rstrip(".") if isinstance(v, float) else str(v)
+
+    for k, rows in (("values", a.get("values")), ("trends", a.get("trends")),
+                    ("outliers", a.get("outliers")), ("pairs", a.get("pairs")),
+                    ("scores", a.get("scores"))):
+        rows = rows or []
+        if not rows:
+            continue
+        if k == "values":
+            s = " · ".join("%s=%s%s" % (r.get("id"), f(r.get("v")), r.get("unit") or "") for r in rows[:8])
+        elif k == "trends":
+            s = " · ".join("%s%s%.0f%%(%s)" % (r.get("id"), {"up": "↑", "down": "↓", "flat": "="}.get(r.get("dir"), "?"),
+                                               r.get("delta_pct") or 0, r.get("vs") or "-") for r in rows[:6])
+        elif k == "outliers":
+            s = " · ".join("%s %s z=%s" % (r.get("id"), r.get("side"), f(r.get("z") or 0)) for r in rows[:6])
+        elif k == "pairs":
+            s = " · ".join("%s~%s rho=%s n=%s" % (r.get("a"), r.get("b"), f(r.get("rho") or 0), r.get("n"))
+                           for r in rows[:6])
+        else:
+            s = " · ".join("%s %s/%s" % (r.get("id"), f(r.get("v")), f(r.get("of") or 100)) for r in rows[:6])
+        out.append("%s: %s" % (k, s))
+    for k in ("tags", "notes"):
+        if a.get(k):
+            out.append("%s: %s" % (k, " · ".join(a[k])))
+    n = sum(1 for r in (a.get("values") or []) if r.get("unverified"))
+    if n:
+        out.append("unverified: %d" % n)
+    au = (rec or {}).get("audit") or {}
+    if au.get("dropped_items"):
+        out.append("丢弃(不可溯源): %d" % len(au["dropped_items"]))
+    return "\n".join(out)
 
 
 def show(n=1, schema=False):
@@ -369,10 +433,12 @@ def main(argv=None):
             except Exception:
                 n = 1
         return show(n)
+    QUIET[0] = "--quiet" in argv
     if "--now" not in argv:
         print(__doc__)
         return 0
-    return 0 if run_once(do_post=("--dry" not in argv), do_print=("--print" in argv)) else 1
+    return 0 if run_once(do_post=("--dry" not in argv), do_print=("--print" in argv),
+                         do_digest=("--digest" in argv)) else 1
 
 
 if __name__ == "__main__":
