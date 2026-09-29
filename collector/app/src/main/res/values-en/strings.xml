@@ -27,6 +27,5 @@
     <string name="toggle_notify">Receive her reminders as notifications (no WeChat, no rate limit)</string>
     <string name="switch_notify">Her reminders as notifications (no WeChat)</string>
     <string name="section_connect">Connection</string>
-    <string name="section_permissions">What to collect</string>
     <string name="section_keepalive">Keep alive</string>
 </resources>

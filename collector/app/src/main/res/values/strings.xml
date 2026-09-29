@@ -27,6 +27,5 @@
     <string name="toggle_notify">用通知收她的提醒（不走微信，不会被限流）</string>
     <string name="switch_notify">用通知收她的提醒（不走微信）</string>
     <string name="section_connect">连接</string>
-    <string name="section_permissions">采集什么</string>
     <string name="section_keepalive">后台保活</string>
 </resources>
