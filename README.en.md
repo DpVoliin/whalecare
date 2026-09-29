@@ -149,6 +149,16 @@ by **mechanisms**, not by "remembering to check":
 The primary path is *speaker → gateway webhook → WeChat*. The hub also ships its own
 **direct-send** channels — deliberately **never automatic** (so they can't duplicate the
 speaker), meant for cron / extensions / manual calls. All are plain HTTP, no SDK, no deps.
+**There is also a 10th path: the phone notification.** The collector app polls
+`/pending?for=<device>` every 120 s and posts a **local notification** — local notifications are
+not rate-limited by anyone, and they are private by construction. Each notification carries
+**👍 / 👎** buttons that post straight to `/feedback` (the only input her Thompson sampling
+learns from). It does not duplicate the WeChat path: the hub keeps **per-target** queues.
+
+Her **art assets** are served by the hub at `/asset/<name>` (from `$WHALE_HOME/assets/`) — never
+committed to any repo, so swapping art needs no rebuild; open-source users fall back to the
+bundled vector placeholder.
+
 **8 of them are text channels** (they send *words*, for humans); the **9th is a data channel**
 (it sends **AI-analysed structured data**, for machines):
 
