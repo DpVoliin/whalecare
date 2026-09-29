@@ -75,6 +75,8 @@ object Notifier {
         }
         val n: Notification = NotificationCompat.Builder(ctx, CH_REMINDER)
             .setSmallIcon(icon(ctx))
+            // 有真头像就用作大图（通知上就是她本人 ✓ 取不到就留空 ✓ 不影响功能）
+            .apply { runCatching { Assets.avatar(ctx)?.let { setLargeIcon(it) } } }
             .setContentTitle("鲸鲸")
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))   // 长句可展开 ✓

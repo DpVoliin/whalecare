@@ -194,6 +194,18 @@ class MainActivity : AppCompatActivity() {
             }
             head.text = q
         }
+        // ★ 她的真头像（2026-09-29）：从中枢 /asset 拉，缓存在本地 ✓
+        //   放**后台线程**取（网络不能压主线程 ✗）→ 拿到再回主线程换图 ✓
+        //   取不到就保持布局里的**矢量占位** ✓（绝不让头像变空白 ✗）
+        Thread {
+            val bm = runCatching { Assets.avatar(this) }.getOrNull()
+            if (bm != null) {
+                runOnUiThread { runCatching {
+                    findViewById<android.widget.ImageView>(R.id.ivAvatar).setImageBitmap(bm)
+                } }
+            }
+        }.start()
+
         runCatching { findViewById<TextView>(R.id.tvKeepAlive).text = KeepAlive.statusText(this) }
         runCatching {
             val fp = TlsTofu.pinnedFingerprint(this)
