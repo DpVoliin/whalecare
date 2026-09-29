@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:6af2722f-f136-4757-99e2-f9f67bc88585",
+  "serialNumber": "urn:uuid:b8616ebf-ecad-4b3f-a3c6-f4facb3162b5",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-09-28T05:42:14Z",
+    "timestamp": "2026-09-28T14:34:44Z",
     "tools": [
       {
         "vendor": "whalecare",
@@ -21,7 +21,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "5cafb4ad86fae5bae69889e7bc3f51f2999d99d8b065908aacbe1ce077f0c902"
+          "content": "744d3f2626b5160c5c99195f514a8ae8ebaf9bfe456c05f79ca72a753edfa0ef"
         }
       ],
       "properties": [
@@ -46,7 +46,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "5cafb4ad86fae5bae69889e7bc3f51f2999d99d8b065908aacbe1ce077f0c902"
+          "content": "744d3f2626b5160c5c99195f514a8ae8ebaf9bfe456c05f79ca72a753edfa0ef"
         }
       ],
       "properties": [

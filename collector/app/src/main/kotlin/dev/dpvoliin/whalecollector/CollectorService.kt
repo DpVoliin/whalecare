@@ -47,6 +47,20 @@ class CollectorService : Service() {
         }
     }
 
+    /**
+     * 她的提醒轮询（2026-09-29 加）—— **独立于采集节奏**。
+     *
+     * 为什么不挂在采集 tick 上：采集默认 30 分钟一轮 ✗ 提醒等 30 分钟就失去意义了 ✓
+     * 为什么 120 秒：本地通知没人限流 ✓ 这个频率既够快又几乎不耗电 ✓
+     * 为什么放后台线程：网络调用不能压主线程 ✗（广播/Handler 都在主线程 ✓）
+     */
+    private val remTick = object : Runnable {
+        override fun run() {
+            Thread { runCatching { Hub.checkReminders(this@CollectorService) } }.start()
+            handler.postDelayed(this, 120_000L)
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         P.attach(this)
@@ -58,6 +72,8 @@ class CollectorService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         handler.removeCallbacks(tick)
         handler.post(tick)
+        handler.removeCallbacks(remTick)
+        handler.post(remTick)
         scheduleExactWake()          // ★ 每次起来都重排一次精确唤醒（下面有说明）
         return START_STICKY
     }
@@ -154,6 +170,24 @@ class CollectorService : Service() {
         //   · 其余（白天/下午/晚上）→ 低：不需要，省电
         //   · 睡着 00:30–06:30 → 很低：几乎不动
         //   · 上课时段 → 低（人在教室，没什么新信息）
+        // ★★ 2026-09-29 新增：**交互感知**（必须在时段分档之前判断）
+        //   为什么必须加：`lastInteractiveAt` 这个变量以前**只写不读** ——
+        //   界面上写着"随使用自动调整"，其实只按时段/睡眠调，跟他当时在不在用手机毫无关系 ✗
+        //   后果很具体：白天一律 30 分钟一采 → 相邻两条上报的间隔普遍 > 10 分钟 ⇒
+        //   数据里"他在用手机"和"他把手机放下了"**分不开**，于是所有需要细粒度的信号
+        //   （活跃时段、使用 episode 的断点）全是噪声（实测留出验证倍数 0.44–0.76，学不出窗口）。
+        //   现在：屏幕亮着 → 2 分钟一采；刚放下不久 → 5 分钟；久没动静 → 回落原来的时段分档。
+        //   ★ 省电上不吃亏：屏幕亮着时 CPU 本来就醒着，handler 定时**不会额外唤醒设备**；
+        //     真正耗电的"熄屏唤醒"仍只由 10 分钟的 AlarmManager 负责
+        //     （Android 打盹时 setExactAndAllowWhileIdle 本身就被限制到约 9 分钟一次，
+        //      排得更密也不会被执行 —— 所以没必要、也不该动它）。
+        val interactive = runCatching {
+            (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
+        }.getOrDefault(false)
+        if (interactive) return 2 * 60_000L                              // 正在用 → 细粒度
+        val sinceInteractiveMin = (SystemClock.elapsedRealtime() - lastInteractiveAt) / 60_000L
+        if (sinceInteractiveMin <= 20) return 5 * 60_000L                 // 刚放下 → 中频
+
         if (LocalTimetable.inClassNow(this)) return 30 * 60_000L
 
         // 睡前/早上不是死时间：从你的睡眠记录里推（样本不足才回落 22:30 睡 / 07:00 起）

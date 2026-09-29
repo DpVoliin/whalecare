@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 分组卡片底（2026-09-29 UI 重做）—— 圆角 + 细描边 ✓ 深色下靠"面"分层而不是靠线 ✓ -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/surface" />
+    <corners android:radius="16dp" />
+    <stroke android:width="1dp" android:color="@color/outline" />
+</shape>

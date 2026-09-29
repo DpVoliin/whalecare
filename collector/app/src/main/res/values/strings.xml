@@ -24,4 +24,9 @@
     <string name="btn_bgpower">③ 打开后台耗电管理</string>
     <string name="btn_exact_alarm">④ 允许精确闹钟</string>
     <string name="btn_reset_tls">重置中枢证书指纹</string>
+    <string name="toggle_notify">用通知收她的提醒（不走微信，不会被限流）</string>
+    <string name="switch_notify">用通知收她的提醒（不走微信）</string>
+    <string name="section_connect">连接</string>
+    <string name="section_permissions">采集什么</string>
+    <string name="section_keepalive">后台保活</string>
 </resources>

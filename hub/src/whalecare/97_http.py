@@ -357,6 +357,35 @@ class Handler(BaseHTTPRequestHandler):
             with db() as c:
                 rows = c.execute("SELECT * FROM decisions ORDER BY id DESC LIMIT ?", (lim,)).fetchall()
             return self._send(200, {"count": len(rows), "items": [dict(r) for r in rows]})
+        if path.startswith("/asset/"):
+            # ★ 2026-09-29 加：把"她的形象素材"从中枢发给 app / 挂件 ✓
+            #   为什么走中枢而不是放进仓库：素材是主人的私有资源 ✗
+            #   公开仓库只留**占位图** ✓ 真图存在中枢本地目录 ✓ 换图不用重发版 ✓
+            #   鉴权：**只认 header X-Token** ✓（和全局一致 ✓
+            #   为什么不做 ?t= 兜底：那种写法会把 token 写进服务器日志/浏览器历史 ✓ 全局已明确禁止 ✓
+            #   → app 取素材必须走代码（带 header ✓）不能直接塞进 <img src> ✓）
+            #   安全：**白名单名字** + 只取 basename ✓ 杜绝 ../ 穿越 ✓
+            _name = os.path.basename(path[len("/asset/"):])
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{1,48}\.(png|jpg|jpeg|webp|ico|crt|wav|ogg|ttf|otf)", _name, re.I):
+                return self._send(400, {"ok": False, "error": "文件名不合规"})
+            # 第二道防线（入口本已全局鉴权 ✓ 这里再确认一次 ✓ 万一将来白名单松动也不至于裸奔 ✓）
+            if not self._auth(parse_qs(urlparse(self.path).query)):
+                return
+            _dir = pathlib.Path(os.getenv("WHALE_ASSETS") or (pathlib.Path(os.getenv("WHALE_HOME") or ".") / "assets"))
+            _f = _dir / _name
+            if not _f.is_file():
+                return self._send(404, {"ok": False, "error": "not found", "dir": str(_dir)})
+            _b = _f.read_bytes()
+            _ct = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp",
+                   "ico": "image/x-icon", "crt": "application/x-x509-ca-cert", "wav": "audio/wav",
+                   "ogg": "audio/ogg", "ttf": "font/ttf", "otf": "font/otf"}.get(_name.rsplit(".", 1)[-1].lower(), "application/octet-stream")
+            self.send_response(200)
+            self.send_header("Content-Type", _ct)
+            self.send_header("Content-Length", str(len(_b)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(_b)
+            return
         if path == "/bands":
             # ★ 这里原来是**只挂在 do_POST** 的：说话层用 GET 调（它无 body 时就走 GET），
             #   于是永远 404 → 分桶后验静默失效、一直退回全局后验（今天才查出来）。

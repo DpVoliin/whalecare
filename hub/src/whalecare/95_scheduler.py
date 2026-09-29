@@ -1,4 +1,13 @@
 # ----------------------------------------------------------------- 调度线程
+def _close_recently(last: dict, now) -> bool:
+    """两小时内是否已经收过尾（晚间简报 22:30 / 睡前总结 22:15 内容重叠 ✗ 只留一条 ✓）。"""
+    try:
+        t = datetime.fromisoformat(last.get("close_at") or "")
+        return (now - t).total_seconds() < 2 * 3600
+    except Exception:
+        return False
+
+
 def scheduler():
     """每 5 秒看一眼：到点生成简报 / 发现异常立刻说（不依赖外部 cron）。
 
@@ -40,9 +49,17 @@ def scheduler():
                 bed_min, _n = est_bedtime()
                 fire_hm = f"{(bed_min - 15) % 1440 // 60:02d}:{(bed_min - 15) % 1440 % 60:02d}"
                 if hm == fire_hm and last.get("bed") != day:
+                    # ★ 2026-09-28 修（用户："又结尾了两次"）：晚间简报与睡前总结**内容重叠** ✗
+                    #   evening=22:30 · 睡前=推算入睡-15分(实测 22:15) → 相隔 15 分钟说两遍 ✓
+                    #   共用一个"今天已收尾"标记：两小时内只收一次 ✓（隔得久算两件事 ✓ 照发 ✓）
+                    if _close_recently(last, now):
+                        last["bed"] = day
+                        save_state(last)
+                        print("[sched] 刚收过尾（2 小时内）→ 跳过睡前总结，避免一天收两次", flush=True)
                     txt = bedtime_brief()
                     say(txt, "info", kind="brief_bedtime", key=f"bed:{day}", now=now, force=True)
                     last["bed"] = day
+                    last["close_at"] = now.isoformat(timespec="seconds")   # ★ 记"今天已收尾"
                     save_state(last)
             except Exception as e:
                 print(f"[bed] {e}", flush=True)
@@ -211,7 +228,15 @@ def scheduler():
 
             for key, kind in (("morning", "brief_morning"), ("evening", "brief_evening")):
                 if hm == CFG["schedule"][key] and last[key] != day:
+                    # ★ 白天那条照发；晚间这条若两小时内已收过尾就跳过（避免"结尾两次" ✓）
+                    if key == "evening" and _close_recently(last, now):
+                        last[key] = day
+                        save_state(last)
+                        print("[sched] 刚收过尾（2 小时内）→ 跳过晚间简报，避免一天收两次", flush=True)
+                        continue
                     last[key] = day
+                    if key == "evening":
+                        last["close_at"] = now.isoformat(timespec="seconds")
                     save_state(last)
                     compose_brief(kind)
         except Exception as e:

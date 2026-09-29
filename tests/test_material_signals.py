@@ -50,23 +50,30 @@ def hub_context_keys():
 
 
 def speaker_read_keys():
-    """抽取 speaker material_score() 里所有 ctx.get("k") / ctx["k"]。"""
-    src = (ROOT / "speaker" / "whale_speaker.py").read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "material_score"), None)
-    if fn is None:
-        raise AssertionError("whale_speaker.py 里找不到 material_score()")
+    """抽取评分引擎里所有读的键（ctx.get("k") / ctx["k"]）。
+
+    ★ 2026-09-29：料分的实现从 whale_speaker.material_score 搬到了
+      speaker/whale_salience.py（加权五维）。这个测试必须跟着**实现**走，
+      否则它会因为读的是那个"薄封装"而抽不到键 → 静默失效（守卫变摆设）。
+      现在 cand_ctx 是唯一的读取点，material_score 只是它的薄封装。
+    """
     keys = set()
-    for node in ast.walk(fn):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get":
-            if isinstance(node.func.value, ast.Name) and node.func.value.id == "ctx" and node.args:
-                a0 = node.args[0]
-                if isinstance(a0, ast.Constant) and isinstance(a0.value, str):
-                    keys.add(a0.value)
-        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "ctx":
-            sl = node.slice
-            if isinstance(sl, ast.Constant) and isinstance(sl.value, str):
-                keys.add(sl.value)
+    for rel, fn_name in (("speaker/whale_salience.py", "candidates"),):
+        src = (ROOT / rel).read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == fn_name), None)
+        if fn is None:
+            raise AssertionError("%s 里找不到 %s()" % (rel, fn_name))
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get":
+                if isinstance(node.func.value, ast.Name) and node.func.value.id == "ctx" and node.args:
+                    a0 = node.args[0]
+                    if isinstance(a0, ast.Constant) and isinstance(a0.value, str):
+                        keys.add(a0.value)
+            if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "ctx":
+                sl = node.slice
+                if isinstance(sl, ast.Constant) and isinstance(sl.value, str):
+                    keys.add(sl.value)
     return keys
 
 

@@ -31,6 +31,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var swHealth: SwitchCompat
     private lateinit var swMusic: SwitchCompat      // 曲名开关
     private lateinit var swOrders: SwitchCompat     // 订单开关
+    private lateinit var swNotify: SwitchCompat     // 用通知收她的提醒（不走微信 ✓）
     private lateinit var tvStatus: TextView
 
     private val pickTimetable = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
@@ -75,11 +76,13 @@ class MainActivity : AppCompatActivity() {
         // 两个新开关：曲名 / 订单（隐私开关，默认开，可关）
         findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.swMusic).also { swMusic = it }
         findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.swOrders).also { swOrders = it }
+        swNotify = findViewById(R.id.swNotify)
         swUsage.isChecked = P.usageOn
         swCalendar.isChecked = P.calendarOn
         swHealth.isChecked = P.healthOn
         swMusic.isChecked = P.musicTitleOn
         swOrders.isChecked = P.ordersOn
+        swNotify.isChecked = P.notifyOn
 
         // ── 后台保活：能程序化的走官方 API，不能的跳厂商页面，状态如实显示 ✓
         val tvKeepAlive = findViewById<TextView>(R.id.tvKeepAlive)
@@ -123,6 +126,7 @@ class MainActivity : AppCompatActivity() {
             }
             P.musicTitleOn = swMusic.isChecked
             P.ordersOn = swOrders.isChecked
+            P.notifyOn = swNotify.isChecked
             CollectorService.start(this)
             toast("已保存，采集服务已启动")
             refresh()
@@ -175,6 +179,21 @@ class MainActivity : AppCompatActivity() {
     /** 状态行：只写真信息（权限是否到位、上次上报结果、队列积压）。 */
     private fun refresh() {
         // 保活状态（每次刷新都更新 ✓ 从系统设置回来时 onResume → refresh 会走到这里）
+        // ★ 一句话状态（2026-09-29 UI 重做）：让她"现在什么情况"一眼可见 ✓
+        //   规则：先说最有用的那条 ✓ 全好就短一句 ✓ 不堆术语 ✓
+        runCatching {
+            val head = findViewById<TextView>(R.id.tvHeadline)
+            val q = when {
+                P.hubUrl.isBlank() || P.token.isBlank() -> "还没填中枢地址 ✓ 填完就能开始"
+                else -> {
+                    val rep = if (P.lastReport.isBlank()) "还没上报过" else P.lastReport
+                    val qn = if (P.queueSize() > 0) " · 待补发 ${P.queueSize()} 条" else ""
+                    val notif = if (P.notifyOn) "通知已开 ✓" else "通知关着（收不到提醒）"
+                    "$rep$qn · $notif"
+                }
+            }
+            head.text = q
+        }
         runCatching { findViewById<TextView>(R.id.tvKeepAlive).text = KeepAlive.statusText(this) }
         runCatching {
             val fp = TlsTofu.pinnedFingerprint(this)

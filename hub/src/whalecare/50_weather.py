@@ -190,33 +190,110 @@ def fetch_weather(days=2):
     return n
 
 
-def weather_of(which=0):
-    """which=0 今天 / 1 明天。只认 12 小时内的数据，避免拿旧天气说事。"""
+_DATE_RE = None
+
+
+def day_of(m, today=None):
+    """一条 weather.day 的 meta 到底指**哪一天**。返回 date 或 None。
+
+    两种来源形状都要认：
+      · 中国天气网（主）：`date="9/28"`（**不补零**）、没有 for_day
+      · Open-Meteo（兜底）：`for_day="2026-09-29"`（ISO）
+    ★ 为什么要专门有此函数（2026-09-29 修的真 bug）：
+      60_analysis 原来直接对 `date` 做**字符串排序** —— "10/1" < "9/28"（'1' < '9'）
+      ⇒ 9→10 月交界时"今天"被挑成三天后、"明天"被挑成昨天 ✗
+      （真实语料里"明天有冰雹""早上提醒明早的干嘛"就是这么来的）。
+    """
+    global _DATE_RE
+    if _DATE_RE is None:
+        import re as _re
+        _DATE_RE = _re.compile(r"^(?:(\d{4})[-/])?(\d{1,2})[-/](\d{1,2})$")
+    if not isinstance(m, dict):
+        return None
+    today = today or datetime.now(TZ).date()
+    for raw in (m.get("for_day"), m.get("date")):
+        mt = _DATE_RE.match(str(raw or "").strip())
+        if not mt:
+            continue
+        y, mo, d = mt.group(1), int(mt.group(2)), int(mt.group(3))
+        cands = []
+        for cy in ([int(y)] if y else [today.year, today.year + 1, today.year - 1]):
+            try:
+                cands.append(datetime(cy, mo, d).date())
+            except Exception:
+                continue
+        cands = [c for c in cands if abs((c - today).days) <= 200]      # 跨年/跨月自动纠
+        if cands:
+            return min(cands, key=lambda c: abs((c - today).days))
+    return None
+
+
+def weather_days(today=None, fresh_hours=12, city_code=None):
+    """未来几天的预报，**按真实日期排序**（最早一条 = 今天），已过去的日子剔除。
+
+    每天只留**最新一次抓取**的那条（否则同一个日期会有多份重复记录）。
+    `city_code` 给了就只认这个城市（多地用户各看各的，与 llm_context 的口径一致）。
+    """
+    today = today or datetime.now(TZ).date()
     try:
         with db() as c:
             rows = c.execute("SELECT ts, meta FROM metrics WHERE metric='weather.day' "
-                             "ORDER BY ts DESC LIMIT 4").fetchall()
+                             "ORDER BY ts DESC LIMIT 12").fetchall()
     except Exception:
-        return None
-    seen = []
+        return []
+    best, order = {}, []
     for r in rows:
         try:
             m = json.loads(r["meta"] or "{}")
         except Exception:
             continue
-        if m.get("for_day") in [x.get("for_day") for x in seen]:
-            continue
         try:
-            fresh = (datetime.now(TZ) - datetime.fromisoformat(r["ts"])).total_seconds() < 12 * 3600
+            fresh = (datetime.now(TZ) - datetime.fromisoformat(r["ts"])).total_seconds() < fresh_hours * 3600
         except Exception:
             fresh = False
-        if fresh:
-            seen.append(m)
-    if len(seen) <= which:
-        return None
-    m = seen[which]
-    return {"desc": m.get("desc"), "tmin": m.get("tmin"), "tmax": m.get("tmax"), "rain_prob": m.get("rain"),
-            "for_day": m.get("for_day")}
+        if not fresh:
+            continue
+        if city_code and str(m.get("city_code") or city_code) != str(city_code):
+            continue
+        d = day_of(m, today)
+        if d is None or d < today:          # ★ 过去的日子不能冒充"今天/明天"
+            continue
+        if d in best:                       # 同一天：第一次遇到的就是最新的（按 ts DESC ✓）
+            continue
+        best[d] = m
+        order.append(d)
+    order.sort()
+    out = []
+    for d in order:
+        m = dict(best[d])
+        delta = (d - today).days
+        m["for_day"], m["date"] = d.isoformat(), d.isoformat()
+        m["label"] = ("今天" if delta == 0 else "明天" if delta == 1
+                      else "后天" if delta == 2 else "%d 天后" % delta)
+        m.setdefault("city", m.get("city") or "")
+        out.append(m)
+    return out
+
+
+def weather_of(which=0, today=None):
+    """which=0 今天 / 1 明天 —— 按**真实日期**取，不是"取第 N 条"。拿不到就 None。
+
+    踩过的三个坑（2026-09-29 一起修的）：
+      ① 按字符串排日期 → "10/1" < "9/28" ⇒ 挑错天 ✗
+      ② 去重键用 `for_day`，而主源（中国天气网）**根本不写 for_day**
+         → 全部都是 None → `None in [None]` → 只剩第一条 ⇒ **which=1 永远 None** ✗
+      ③ **按索引取第 N 条**本身就危险：今天的预报行一旦缺失，"第 0 条"就是明天、
+         "第 1 条"就是后天 ⇒ **后天的天气被当成今天讲**（宁可不说，也别讲错日子）
+    """
+    t = today or datetime.now(TZ).date()
+    want = (t + timedelta(days=int(which))).isoformat()
+    for m in weather_days(today=t):
+        if str(m.get("for_day")) == want:
+            return {"desc": m.get("desc"), "tmin": m.get("tmin"), "tmax": m.get("tmax"),
+                    # 主源不提供降水概率 → 老实给 None（**不编**）；有就给
+                    "rain_prob": m.get("rain") if m.get("rain") is not None else m.get("rain_prob"),
+                    "for_day": m.get("for_day"), "label": m.get("label"), "src": m.get("src") or ""}
+    return None
 
 
 

@@ -11,21 +11,57 @@
         android:orientation="vertical"
         android:padding="20dp">
 
-        <TextView
-            android:layout_width="wrap_content"
+        <!-- ★ 头部卡片：她的头像 + 一句话状态（2026-09-29 UI 重做）
+             设计意图：打开 app 一眼看到"她现在的状态" ✓ 而不是先看到一堆输入框 ✓ -->
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/app_name"
-            android:textColor="@color/text_primary"
-            android:textSize="20sp"
-            android:textStyle="bold" />
+            android:background="@drawable/bg_card"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="16dp">
+
+            <ImageView
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:contentDescription="@string/app_name"
+                android:src="@drawable/whale_avatar" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="14dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/app_name"
+                    android:textColor="@color/text_primary"
+                    android:textSize="19sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvHeadline"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="5dp"
+                    android:lineSpacingExtra="2dp"
+                    android:text="@string/subtitle"
+                    android:textColor="@color/accent"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/subtitle"
+            android:layout_marginTop="22dp"
+            android:text="@string/section_connect"
             android:textColor="@color/text_secondary"
-            android:textSize="12sp" />
+            android:textSize="11sp"
+            android:letterSpacing="0.08" />
 
         <TextView
             android:layout_width="wrap_content"
@@ -126,6 +162,21 @@
             android:textColor="@color/text_secondary"
             android:textSize="13sp" />
 
+        <androidx.appcompat.widget.SwitchCompat
+
+            android:id="@+id/swNotify"
+
+            android:layout_width="match_parent"
+
+            android:layout_height="wrap_content"
+
+            android:layout_marginTop="6dp"
+
+            android:text="@string/switch_notify"
+            android:textColor="@color/text_secondary"
+
+            android:textSize="13sp" />
+
         <TextView
             android:id="@+id/tvTlsFp"
             android:layout_width="match_parent"
@@ -217,6 +268,15 @@
             android:textColor="@color/text_primary"
             android:textSize="15sp"
             android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="22dp"
+            android:text="@string/section_keepalive"
+            android:textColor="@color/text_secondary"
+            android:textSize="11sp"
+            android:letterSpacing="0.08" />
 
         <TextView
             android:id="@+id/tvKeepAlive"

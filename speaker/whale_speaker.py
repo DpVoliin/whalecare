@@ -70,11 +70,27 @@ QUIET = (23, 7)                # 免打扰时段（小时，跨夜）
 # ★ 下限从 5 分钟抬到 15 分钟：料多×0.6 与"你刚在用手机"×0.6 一叠加就只剩 8~10 分钟 ✗
 #   （实测 2 小时里决定了 12 次要说话）—— 定点/紧急提醒不受这个下限影响 ✓
 GAP_MIN, GAP_MAX = 15 * 60, 90 * 60
+# ★ 紧急通道的硬间隔：紧急消息绕开节奏闸与日限，但**不能**被 2 秒轮询重复念
+#   （真实事故：睡前总结连发三条就是没有硬间隔造成的）
+URGENT_MIN_GAP = int(os.getenv("WHALE_URGENT_MIN_GAP", "600"))
 GATE_STAMP = pathlib.Path("/home/ubuntu/.hermes/scripts/.whale_last_gate")   # 上次"评估期望效用"的时间戳（防轮询空转刷屏）       # 主动说话的间隔上下限（秒）：最快 5 分钟，最慢 90 分钟
 SAY_MAX_PER_DAY = 12                     # 每日上限（硬顶，可配置）
 # ★ 冷启动期（还没有任何反馈时）每天最多试探着说几条 —— 太少收集不到反馈，太多会烦人 ✓
 COLD_START_PER_DAY = int(os.getenv("WHALE_COLD_START_PER_DAY", "3"))
 SAY_MIN_PER_DAY = 4                      # 被 ✗ 打到底时的下限 —— 再少就变成"坏掉"了
+
+
+FREQ_REF_CAP = 9          # "标准档"的每天上限 —— 频率档用 cap/9 当倍率，免得再引入第二个参数
+
+
+def freq_clamp_cap(base: int) -> int:
+    """按频率档收紧/放宽每天上限：低频 ≈×0.44、标准 ×1.0、高频 ≈×1.78。
+
+    ★ 两个信号同时起作用，谁也不覆盖谁：证据（命中率）决定 base，频率档决定倍率。
+    """
+    c = freq_conf()
+    mult = float(c.get("cap") or FREQ_REF_CAP) / FREQ_REF_CAP
+    return int(max(2, min(int(c.get("cap") or FREQ_REF_CAP), round(base * mult))))
 
 
 def daily_cap(st=None):
@@ -84,6 +100,7 @@ def daily_cap(st=None):
       · θ = Thompson 后验均值（挂件点「说得对/别说」累积出来的命中率）
       · n = 已观测次数；**n < 4 就不动**（样本太少时别拿噪声改她的习惯）
     区间 [SAY_MIN_PER_DAY, SAY_MAX_PER_DAY]：θ=0→4 句，θ=0.5→8 句，θ=1→12 句。
+    ★ 再乘频率档倍率（低频/标准/高频）——用户手动选的档位优先级更高。
     """
     try:
         st = st or pace()
@@ -91,13 +108,280 @@ def daily_cap(st=None):
         a, bb = float(b[0]), float(b[1])
         n = max(0.0, (a - 1) + (bb - 1))
         if n < 4:
-            return SAY_MAX_PER_DAY
+            return freq_clamp_cap(SAY_MAX_PER_DAY)
         theta = a / (a + bb) if (a + bb) else 0.5
         cap = SAY_MIN_PER_DAY + round((SAY_MAX_PER_DAY - SAY_MIN_PER_DAY) * theta)
-        return int(max(SAY_MIN_PER_DAY, min(SAY_MAX_PER_DAY, cap)))
+        return int(freq_clamp_cap(max(SAY_MIN_PER_DAY, min(SAY_MAX_PER_DAY, cap))))
     except Exception:
         return SAY_MAX_PER_DAY
 PACE_PATH = pathlib.Path("/home/ubuntu/.hermes/scripts/.whale_pace.json")
+
+# ─────────────── 评分引擎 v2（whale_salience）+ 频率档 ───────────────
+# 为什么换：旧料分是"等权布尔相加 + 3 个档位"，只数件数、不看轻重时效与新鲜度，
+# 而且同一个分既决定"说勤点"又决定"够不够格开口"。详见 speaker/whale_salience.py 文件头。
+# 契约不变的地方：material_score(ctx) 仍返回 (0—10 的整数, 理由列表)，
+# 所以 next_gap/utility_gate/单测/一周模拟的判据都还能用；变化的是分怎么来的。
+SAL_PATH = pathlib.Path(os.getenv("WHALE_SALIENCE", "/home/ubuntu/.hermes/scripts/.whale_salience.json"))
+FREQ_PATH = pathlib.Path(os.getenv("WHALE_FREQ", "/home/ubuntu/.hermes/scripts/.whale_freq.json"))
+_FREQ = {"at": 0.0, "mode": "normal"}
+
+
+def _sal_mod():
+    """取 whale_salience 模块（没有就返回 None —— 引擎缺失不该让整层哑掉）。"""
+    try:
+        import whale_salience as _s
+        return _s
+    except Exception as e:
+        _dbg("salience 模块不可用：%s" % str(e)[:60])
+        return None
+
+
+def freq_mode() -> str:
+    """当前频率档（低频/标准/高频）。热加载：改文件即生效，不用重启。"""
+    try:
+        mt = FREQ_PATH.stat().st_mtime
+        if mt != _FREQ.get("at"):
+            _s = _sal_mod()
+            _FREQ["mode"] = (_s.load_mode(str(FREQ_PATH)) if _s else "normal")
+            if mt and _FREQ.get("at"):
+                _dbg("频率档已变更为：%s" % _FREQ["mode"])
+            _FREQ["at"] = mt
+    except Exception:
+        pass
+    return _FREQ.get("mode") or "normal"
+
+
+def freq_conf() -> dict:
+    _s = _sal_mod()
+    if not _s:
+        return {"label": "标准", "speak": 38, "urgent": 62, "cap": 9, "gap_mult": 1.0, "chat": 1}
+    return _s.MODES.get(freq_mode()) or _s.MODES["normal"]
+
+
+def sal_load() -> dict:
+    """读评分状态（重复计数 + 老问题收口记录）。"""
+    try:
+        d = json.loads(SAL_PATH.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def sal_save(d: dict) -> None:
+    """原子写（临时文件 + replace），避免读到半截文件。"""
+    try:
+        tmp = str(SAL_PATH) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, SAL_PATH)
+    except Exception:
+        pass
+
+
+def sal_repeats() -> dict:
+    d = sal_load()
+    today = time.strftime("%Y-%m-%d")
+    reps = d.get("repeats") or {}
+    if d.get("repeats_day") != today:          # 跨天清零：同一件事新的一天可以再说一次
+        return {}
+    return reps
+
+
+def sal_note(ev: dict) -> None:
+    """开口之后记账：同类同值重复 +1（第二天清零）。"""
+    _s = _sal_mod()
+    if not _s:
+        return
+    d = sal_load()
+    today = time.strftime("%Y-%m-%d")
+    if d.get("repeats_day") != today:
+        d["repeats"], d["repeats_day"] = {}, today
+    d["repeats"] = _s.note_said({"repeats": d.get("repeats") or {}}, ev).get("repeats") or {}
+    sal_save(d)
+
+
+# ── 老问题降噪（"更智能的提醒"的一半是"知道什么时候闭嘴"）─────────────────
+# 真实语料：电脑没上报被连报 8 天（53→62→86→110→134→158 小时），数字一直变、事情没变。
+# 规则：同一个问题连续第 1—2 天照常提；第 3 天起**只在没收口过时说一句收口话**
+#      （"我先不天天念了"），之后彻底安静，直到这个问题真的变了（某天不再出现 → 计数清零）。
+NAG_KEYS = ("没同步", "没上报", "失联", "离线", "没动静")
+NAG_GRACE_DAYS = int(os.getenv("WHALE_NAG_GRACE_DAYS", "2"))
+
+
+def _nag_bucket(fact: str) -> str:
+    """把一条事实归到"哪个问题"上（设备失联按设备分桶）。"""
+    f = str(fact or "")
+    if not any(k in f for k in NAG_KEYS):
+        return ""
+    for dev in ("电脑", "pc_windows", "pc", "手机", "手表", "平板"):
+        if dev in f:
+            return "gap:%s" % ("电脑" if dev in ("pc", "pc_windows") else dev)
+    return "gap:其他"
+
+
+def nag_gate(fact: str) -> tuple:
+    """返回 (是否放行, 是否该说收口话, 桶名)。放行判断会**顺带推进当天的记账**。"""
+    b = _nag_bucket(fact)
+    if not b:
+        return True, False, ""
+    d = sal_load()
+    today = time.strftime("%Y-%m-%d")
+    nag = d.get("nag") or {}
+    it = nag.get(b) or {}
+    if it.get("last_day") and it["last_day"] < today and \
+            (datetime.strptime(today, "%Y-%m-%d") - datetime.strptime(it["last_day"], "%Y-%m-%d")).days > 1:
+        it = {}                                    # 中间整段没再出现 → 视为已解决，重新计数
+    if it.get("last_day") != today:
+        it["days"] = int(it.get("days", 0)) + 1
+        it["last_day"] = today
+        nag[b] = it
+        d["nag"] = nag
+        sal_save(d)
+    days, closed = int(it.get("days", 1)), bool(it.get("closed"))
+    if days <= NAG_GRACE_DAYS:
+        return True, False, b
+    if not closed:
+        return False, True, b                     # 第 3 天：不说第 9 次报数，说一句收口话
+    return False, False, b
+
+
+def nag_close(bucket: str) -> None:
+    d = sal_load()
+    nag = d.get("nag") or {}
+    it = nag.get(bucket) or {}
+    it["closed"] = True
+    nag[bucket] = it
+    d["nag"] = nag
+    sal_save(d)
+
+
+# ── 活跃窗口（说话时机 v4）：**默认影子模式**（只记录，不改行为）─────────────
+# 学出来的"他什么时候是活的"（speaker/whale_windows.py，依据 arXiv:2608.04416 的两载体思路）。
+# 为什么默认只在影子里跑：实测窗口内外的活跃区分度只有 1.2–1.4×，
+# 只够当**乘子**（±30%），不够当开关 —— 先记录一周"新窗口本来会怎么改"，再决定是否真的启用。
+WINDOWS_MODE = os.getenv("WHALE_WINDOW_MODE", "shadow")      # off | shadow | on
+WIN_PATH = pathlib.Path(os.getenv("WHALE_WINDOWS", str(BASE / ".whale_windows.json")))
+WIN_SHADOW = pathlib.Path(os.getenv("WHALE_WINDOWS_SHADOW", str(BASE / ".whale_windows_shadow.jsonl")))
+_WIN = {"at": 0.0, "cfg": {}, "last_shadow": 0.0}
+
+
+def windows_cfg() -> dict:
+    """热加载活跃窗口配置（改文件即生效，不用重启）。"""
+    try:
+        mt = WIN_PATH.stat().st_mtime
+        if mt != _WIN.get("at"):
+            try:
+                import whale_windows as _ww
+                _WIN["cfg"] = _ww.load_cfg(str(WIN_PATH))
+            except Exception:
+                _WIN["cfg"] = json.loads(WIN_PATH.read_text(encoding="utf-8"))
+            _WIN["at"] = mt
+    except Exception:
+        pass
+    return _WIN.get("cfg") or {}
+
+
+def window_mult(now=None) -> dict:
+    """现在该给间隔乘多少（<1 说勤点）。引擎不在/没窗口 → 恒等 1.0。"""
+    try:
+        import whale_windows as _ww
+    except Exception:
+        return {"mult": 1.0, "why": "窗口学习器不可用", "in": "", "conf": 0.0}
+    n = now or time.localtime()
+    try:
+        return _ww.multiplier_at(windows_cfg(), n.tm_hour, n.tm_min)
+    except Exception as e:
+        _dbg("窗口乘子异常（按 1.0 处理）：%s" % str(e)[:60])
+        return {"mult": 1.0, "why": "窗口计算异常", "in": "", "conf": 0.0}
+
+
+def window_effect(now=None) -> dict:
+    """活跃窗口 → **开口阈值**的调整量（正数=阈值下调=更愿意开口）。
+
+    ★ 杠杆的选择有实测依据（2026-09-29）：窗口乘在 next_gap 上**完全无效**
+      （14 天模拟对齐余弦 0.599 → 0.599，把上限从 30% 放大到 45% 也一样）——
+      因为决定"说不说"的是阈值/每日上限/话题台账，间隔早被它们吸收了。
+      所以改成作用在阈值上：活跃窗口下调阈值，死区上调。
+    """
+    r = window_mult(now)
+    m = float(r.get("mult") or 1.0)
+    return {"boost": round(1.0 - m, 4), "mult": m, "why": r.get("why"),
+            "in": r.get("in") or "", "conf": r.get("conf")}
+
+
+def budget_cap(cap: int, now=None) -> float:
+    """此刻的**有效每日额度** —— ★ 2026-09-29 起本杠杆**恒等返回 cap（暂不生效）**。
+
+    为什么"算了但不用"：
+      ① 14 天模拟里看不出任何改善（时机对齐 0.591 vs 0.609）；
+      ② 更要紧的是**形状不对**：加权进度会把"窗口开启之前"的预算压低，
+         而他的活跃窗口恰好在 17:45–24:00（靠天尾）→ 结果 21:00 前反而更没额度说话 ✗
+         正确形式应当是"每个窗口**一次性补一笔**定额额度"（per-window top-up，额度只在窗口内有效），
+         而不是把整天的进度加权 —— 但那要等数据够、且窗口本身站得住再做。
+    影子模式仍会把"本来会是多少额度"记进影子日志（`cap_would`），以后要启用时有据可查。
+    """
+    try:
+        if WINDOWS_MODE == "shadow":
+            import whale_windows as _ww
+            prog = _ww.budget_progress(windows_cfg(), now)
+            _WIN["cap_would"] = round(max(1.0, min(float(cap), float(cap) * prog)), 2)
+        elif WINDOWS_MODE == "on":
+            _WIN["cap_would"] = None      # 见上：形状不对，先不启用
+    except Exception:
+        pass
+    return float(cap)
+
+
+def windows_shadow(st: dict, gap: float, why: str, said: bool = False) -> None:
+    """影子记录：把"这一刻新窗口本来会怎么改"写一行（**不改行为**）。
+
+    只在真的评估过"说/不说"时记（不是每 2 秒一次），且同一小时内最多一条 ——
+    否则日志会被轮询刷爆，等于没有可读性。
+    """
+    if WINDOWS_MODE != "shadow":
+        return
+    if time.time() - float(_WIN.get("last_shadow") or 0) < 300:
+        return
+    try:
+        r = window_mult()
+        if r.get("mult", 1.0) == 1.0 and not r.get("in"):
+            return                                    # 没窗口/没差别 → 不占日志
+        import whale_windows as _ww
+        _ww.shadow_log({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                        "hour": time.localtime().tm_hour, "min": time.localtime().tm_min,
+                        "in": r.get("in") or "", "mult": r.get("mult"), "conf": r.get("conf"),
+                        "would_gap_min": round(gap / r["mult"] / 60.0, 1) if r.get("mult") else None,
+                        "now_gap_min": round(gap / 60.0, 1), "said": bool(said),
+                        "said_today": int(st.get("said", 0)),
+                        "cap_would": _WIN.get("cap_would"), "why": str(why)[:80]},
+                       str(WIN_SHADOW))
+        _WIN["last_shadow"] = time.time()
+    except Exception as e:
+        _dbg("影子记录失败（不影响说话）：%s" % str(e)[:60])
+
+
+def salience_decide(ctx: dict, said_today: int = 0, p_accept=None, now=None) -> dict:
+    """走新引擎做决定；引擎不在就返回 None（调用方回落旧路径）。
+
+    `now`（time.struct_time 形状）可注入：一周模拟必须让"现在几点"跟着模拟时钟走，
+    否则"下节课还有多久""在不在出门窗"全按跑模拟那一刻算 ✗
+    """
+    _s = _sal_mod()
+    if not _s:
+        return None
+    try:
+        _we = window_effect(now)
+        _cap = daily_cap()
+        return _s.decide(ctx, {"repeats": sal_repeats()}, mode=freq_mode(),
+                         said_today=said_today, p_accept=p_accept,
+                         util_threshold=UTIL_THRESHOLD, now=now,
+                         boost=(float(_we.get("boost") or 0.0) if WINDOWS_MODE == "on" else 0.0),
+                         cap_eff=budget_cap(_cap, now))
+    except Exception as e:
+        _dbg("salience 决策异常（回落旧路径）：%s" % str(e)[:80])
+        return None
+
+
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0 Safari/537.36")
 
@@ -456,9 +740,28 @@ def _save_pace(d):
 
 
 def material_score(ctx: dict) -> tuple:
-    """今天"有料程度"：越有料越值得开口。返回 (分数, 理由列表)。
+    """今天"料有多足"：0—10 的整数（10 = 有几件很值得说的事）+ 理由列表。
 
-    也开了外挂口子（见下面的 strategy()）：返回 None 就一直用内置这套。
+    ★ 2026-09-29 起这里是**薄封装**：真算法在 whale_salience（加权五维 + 新鲜度衰减）。
+      保留这个签名是因为 next_gap / utility_gate / 一周模拟 / 单测都按它取分，
+      换掉签名等于同时改四个地方 —— 而那正是"两份会各自腐烂的逻辑"的老毛病。
+      引擎不可用时回落旧实现（_material_score_legacy），**升级不该让整层哑掉**。
+    """
+    _s = _sal_mod()
+    if _s:
+        try:
+            ev = _s.evaluate(ctx, mode=freq_mode(), repeats=sal_repeats())
+            return int(round(ev["score"] / 10.0)), list(ev["why"])
+        except Exception as e:
+            _dbg("salience 算分异常（回落旧料分）：%s" % str(e)[:70])
+    return _material_score_legacy(ctx)
+
+
+def _material_score_legacy(ctx: dict) -> tuple:
+    """旧料分（等权布尔相加）：**只作降级兜底**。
+
+    保留它就是为了"引擎挂了也得能说话" —— 但注意它有几个已知的不成熟处
+    （不看轻重/不看时效/不看新鲜度），别再往这里加规则了，去改 whale_salience。
     """
     _r = _from_strategy("material_score", ctx)
     if _r is not _MISS:
@@ -755,6 +1058,7 @@ def next_gap(ctx: dict, quiet_hint: bool = False) -> tuple:
     t = time.localtime().tm_hour * 60 + time.localtime().tm_min
 
     # ① 时间带基线
+    why = []
     if (6 * 60 + 30) <= t < 10 * 60:          # 早上
         base, band = 12.0, "早上"
     elif t >= 21 * 60 + 30 or t < 30:         # 睡前
@@ -764,14 +1068,30 @@ def next_gap(ctx: dict, quiet_hint: bool = False) -> tuple:
     else:                                     # 白天
         base, band = 35.0, "白天"
 
-    # ② 有料程度
-    score, why = material_score(ctx)
-    if score >= 3:
-        base *= 0.6; why.append(f"料多({score})→说勤点")
+    # ①' 频率档：用户手动选的档位**先乘上去**（低频说少、高频说勤）
+    _fc = freq_conf()
+    base *= float(_fc.get("gap_mult") or 1.0)
+    why.append("%s档×%.2f" % (_fc.get("label"), float(_fc.get("gap_mult") or 1.0)))
+
+    # ①'' 活跃窗口（学出来的时段）：**只做 ±30% 的软调制**，不做开关
+    #      on（用户明确启用）→ 真的乘上去；shadow（默认）→ 只在理由里标注"本会 ×多少"
+    #    注：窗口**不再乘间隔**（实测无效，见 window_effect 的注释）；这里只留一行痕迹。
+    _we = window_effect()
+    if abs(float(_we.get("boost") or 0)) > 1e-6:
+        why.append(("活跃窗口阈值%+.0f%%" % (-100 * float(_we["boost"]))) if WINDOWS_MODE == "on"
+                   else ("（影子）活跃窗口本会调阈值%+.0f%%" % (-100 * float(_we["boost"]))))
+
+    # ② 有料程度（0—10 的分档更细：旧版只有 ≥3/≥1/0 三档，'3 件小事'和'磁盘只剩 1%'没区别）
+    score, why2 = material_score(ctx)
+    why.extend(w for w in why2 if w not in why)
+    if score >= 6:
+        base *= 0.55; why.append(f"料很足({score})→说勤点")
+    elif score >= 3:
+        base *= 0.70; why.append(f"料足({score})→说勤点")
     elif score >= 1:
         base *= 0.85
     else:
-        base *= 1.4; why.append("今天没什么事→少说")
+        base *= 1.40; why.append("今天没什么事→少说")
 
     # ③ 你在不在用手机（中枢里最近一条屏幕数据距现在多久）
     try:
@@ -842,7 +1162,11 @@ def topic_of(text: str):
     for topic, keys in (
         ("社交时长", ("社交",)), ("屏幕时长", ("屏幕",)), ("游戏时长", ("游戏",)),
         ("睡眠", ("睡", "睡眠")), ("课程", ("课", "教室", "节")), ("作业考试", ("作业", "考试")),
-        ("订单快递", ("订单", "快递")), ("天气", ("天气", "降雨", "雷阵")),
+        ("订单快递", ("订单", "快递")),
+        # ★ 预警必须**排在"天气"前面**独立成话题：否则一条日常天气话说完，
+        #   当天的暴雨/雷电预警会被"这个话题今天说过了"直接拦掉（2026-09-29 一周模拟抓到）
+        ("天气预警", ("预警", "警报", "橙色", "红色", "黄色")),
+        ("天气", ("天气", "降雨", "雷阵")),
         ("电脑体检", ("磁盘", "内存", "开机")), ("电量", ("电量", "充电")),
         ("复盘总结", ("复盘", "总结")),
     ):
@@ -907,13 +1231,21 @@ def too_similar(text: str, n=10) -> bool:
     return False
 
 
-METER_HINTS = ("屏幕", "分钟", "小时", "磁盘", "内存", "电量", "坐了", "刷", "社交",
-                "短视频", "游戏", "开机")
+# ★ "可跟踪的数值状态"关键词。注意**不能放"分钟/小时"这种通用单位**：
+#   2026-09-29 上线后立刻误伤 —— 紧急提醒"11 点第 5-6 节上课，还剩 37 分钟"因为带"分钟"
+#   被当成"数值播报"，再被判"数值没变"→ **该立刻说的课被静默拦掉** ✗
+#   判据应当是"某个**可跟踪状态**（屏幕/磁盘/电量…）"，而不是"句子里有单位"。
+METER_HINTS = ("屏幕", "磁盘", "内存", "电量", "坐了", "刷", "社交",
+               "短视频", "游戏", "开机", "步数", "心率", "血氧")
 
 
 def _is_meter_report(text):
-    """这句话是不是在**播报可跟踪的数值状态**？（闲聊/关心不该被事实去重误伤）"""
-    return any(h in (text or "") for h in METER_HINTS)
+    """这句话是不是在**播报可跟踪的数值状态**？（闲聊/关心/定点不该被事实去重误伤）"""
+    t = text or ""
+    if any(h in t for h in METER_HINTS):
+        return True
+    # 单位词只有**跟着状态词**才算（"屏幕 7 小时" ✓ / "还剩 37 分钟" ✗）
+    return bool(re.search(r"(时长|累计|今天(?:用|看|玩))", t))
 
 
 def last_signature():
@@ -1134,6 +1466,24 @@ def startup_selfcheck():
     """启动自检：把"能不能干活"三件事当场验一遍，日志里一眼可见 ✓"""
     print("[selfcheck] ── 启动自检 ──")
     ok_all = True
+    # ⓪ 频率档 + 评分引擎（新加：这两样决定她"说多说少"，日志里必须一眼可见）
+    try:
+        _s = _sal_mod()
+        print("[selfcheck] 评分引擎 ✓ whale_salience%s ｜ 频率档 %s（%s）" % (
+            "" if _s else "（缺失 → 回落旧料分）", freq_mode(),
+            (_s.describe(freq_mode()) if _s else "标准")))
+    except Exception as e:
+        print("[selfcheck] 频率档读取异常：%s" % str(e)[:60])
+    try:
+        _wc = windows_cfg()
+        _ws = _wc.get("windows") or []
+        _bp = budget_cap(daily_cap())
+        print("[selfcheck] 活跃窗口 %s ｜ 学到 %d 个%s ｜ 样本 %s 天 ｜ 此刻额度 %.1f/%d" % (
+            WINDOWS_MODE, len(_ws),
+            ("：" + "、".join("%s-%s" % (w["start"], w["end"]) for w in _ws[:6])) if _ws else "（还没学）",
+            _wc.get("days") or 0, _bp, daily_cap()))
+    except Exception as e:
+        print("[selfcheck] 活跃窗口读取异常：%s" % str(e)[:60])
     # ① 中枢可达 + token 有效
     try:
         st = hub("/health")
@@ -1142,8 +1492,13 @@ def startup_selfcheck():
         print(f"[selfcheck] ✗ 中枢不可达：{str(e)[:70]}")
         ok_all = False
     try:
-        n = len((hub("/pending?for=" + TERMINAL).get("items") or []))
-        print(f"[selfcheck] token 有效 ✓ 待发 {n} 条")
+        # ★★ 必须带 peek=1：中枢的 /pending **不带 peek 就等于"认领"**
+        #    （`UPDATE reminders SET status='delivered', delivered_to=?`）。
+        #    原来这里是裸的 `/pending?for=…` → **每次重启都会把待发提醒标记成"已投递"、
+        #    却一条都没发出去** ⇒ 用户永远收不到（2026-09-29 实测：4 条早间提醒凭空消失，
+        #    中枢里显示 delivered、微信里没有）。自检只看数量，绝不能消费队列。
+        n = len((hub("/pending?for=" + TERMINAL + "&peek=1&limit=20").get("items") or []))
+        print(f"[selfcheck] token 有效 ✓ 待发 {n} 条（peek，未认领）")
     except Exception as e:
         print(f"[selfcheck] ✗ token/待发接口异常：{str(e)[:70]}")
         ok_all = False
@@ -1192,7 +1547,16 @@ def relay_urgent():
     ⚠️ 同一轮可能积压多条（例如两节课同时进入提醒窗口，或好几种规则同时命中）。
     以前一次只取 1 条、调度器连着跑 → 主人那边「一秒连放好几条，啥也看不到」。
     现在：**同轮的短提醒先合并成一条再发**（只有一条时行为完全不变）。
+
+    ★ 2026-09-29 两处改动：
+      · 合并**走模型合成人话**（原来是 `"；".join()` → 语料里出现"8:00 说三遍、同一件事
+        两种说法、还带运维口吻"的四段拼接）。失败仍回落"；"拼接，信息不丢。
+      · 睡前小总结**不再"原样发"**：原来那串"· 屏幕 7 小时 14 分 · 上了 3 节课 /
+        · 睡点 22:30（先按默认，攒几天睡眠数据就更准）"会把人话和内部注释一起念出来。
+        现在改走模型（数字必须原样保留，由质量闸把关），失败回落原文。
+      · 加入**老问题降噪**：同一件没变化的事连报第 3 天起不再报数，改为说一句收口话。
     """
+    import whale_voice
     d = hub(f"/pending?for={TERMINAL}&limit=4&peek=1")
     items = d.get("items") or []
     if not items:
@@ -1208,24 +1572,58 @@ def relay_urgent():
             _dbg(f"#{_it.get('id')} 本地已投递过 → 跳过并补回执")
             _ack_with_retry(_it["id"])
             continue
+        # ── 老问题降噪：没变化的事不天天念 ────────────────────────────────
+        _allow, _need_close, _bucket = nag_gate(_it.get("text") or "")
+        if not _allow:
+            if _need_close:
+                _topic = re.sub(r"^（[^）]{0,12}）\s*", "", _it.get("text") or "").strip().rstrip("。")
+                try:
+                    _msg = whale_voice.close_once(_topic)
+                except Exception as _e:
+                    _msg = ""
+                    _dbg("收口话生成异常：%s" % str(_e)[:60])
+                if _msg:
+                    try:
+                        _ok, _info = deliver(_msg)
+                        if _ok:
+                            remember(_msg)
+                            nag_close(_bucket)
+                            _dbg(f"#{_it.get('id')} 老问题（{_bucket}）→ 只说一句收口话：{_msg[:34]}")
+                        else:
+                            _dbg(f"收口话被拒：{_info[:60]}")
+                    except Exception as _e:
+                        _dbg("收口话投递异常：%s" % str(_e)[:80])
+                else:
+                    _dbg(f"#{_it.get('id')} 老问题（{_bucket}）→ 静默（收口话没生成出来）")
+            else:
+                _dbg(f"#{_it.get('id')} 老问题（{_bucket}）已收口过 → 继续静默，不打扰")
+            health_bump("blocked", "nag")
+            _ack_with_retry(_it["id"])
+            continue
         if "bedtime" in (_it.get("kind") or ""):
-            items = [_it]            # 睡前小总结要原样发、不润色 → 只处理它一条
+            items = [_it]            # 睡前小总结单独处理（下面走模型润色，但要保住数字）
             break
     else:
         if len(items) >= 2 and all(len(_it.get("text") or "") <= 90 for _it in items):
             ids = [_it["id"] for _it in items]
             facts = [re.sub(r"^（[^）]{0,12}）\s*", "", (_it.get("text") or "")).strip().rstrip("。")
                      for _it in items]
-            merged = "；".join(f for f in facts if f)
-            _dbg(f"合并 {len(ids)} 条提醒为一条：{merged[:70]}")
+            facts = [f for f in facts if f]
+            merged = "；".join(facts)
             try:
-                ok, info = deliver(merged)
+                text = whale_voice.speak_many(facts, fallback=merged, limit=140)
+            except Exception as e:
+                _dbg("合成失败 → 回落拼接：%s" % str(e)[:70])
+                text = merged
+            _dbg(f"合并 {len(ids)} 条提醒为一条：{text[:70]}")
+            try:
+                ok, info = deliver(text)
             except Exception as e:
                 _dbg("合并投递失败：", str(e)[:120])
                 return False
             if ok:
                 _ack_with_retry(ids)
-                remember(merged)
+                remember(text)
                 time.sleep(GAP)
                 return True
             _dbg(f"合并投递被拒：{info[:70]}")
@@ -1236,13 +1634,19 @@ def relay_urgent():
     # 中枢模板里可能带"（攥住你的手腕）"这类她做不到的假动作 —— 传给我们自己生成时先剥掉
     fact = re.sub(r"^（[^）]{0,12}）\s*", "", raw) or raw
     if "bedtime" in kind:
-        # 睡前小总结：**原样发**（总结要准，不让模型润色掉信息），也不进去重
+        # 睡前小总结：走模型润色（**数字由质量闸保底**：丢了数字就不合格、回落原文），
+        # 也不再"原样发"那串带内部注释的模板。
         try:
-            ok, info = deliver(fact)
+            text = whale_voice.speak(fact, fallback=fact, tries=2)
+        except Exception as e:
+            _dbg("睡前总结润色异常（用原文）：%s" % str(e)[:80])
+            text = fact
+        try:
+            ok, info = deliver(text)
             if ok:
                 _ack_with_retry(it["id"])
-                _dbg(f"#{it['id']} 睡前总结已发")
-                remember(fact)
+                _dbg(f"#{it['id']} 睡前总结已发：{text[:34]}")
+                remember(text)
                 time.sleep(GAP)
             else:
                 _dbg(f"睡前总结被拒：{info[:70]}")
@@ -1250,7 +1654,7 @@ def relay_urgent():
             _dbg("睡前总结异常：", str(e)[:100])
         return True
 
-    import whale_voice
+    # （whale_voice 已在函数开头导入 —— 前面合并/收口话/睡前总结都要用）
     if not kind.startswith("scheduled"):          # 定点提醒 = 主人自己要的，一律照发
         if too_similar(fact):
             _ack_with_retry(it["id"])
@@ -1331,7 +1735,14 @@ def material_of(ctx: dict) -> int:
 
 
 def maybe_speak():
-    """隔一段时间，让模型自己判断：要不要跟主人说点什么（提醒 or 闲聊 or 沉默）。"""
+    """隔一段时间，让模型自己判断：要不要跟主人说点什么（提醒 or 闲聊 or 沉默）。
+
+    ★ 2026-09-29 起决策顺序变了（换评分引擎的必然结果）：
+       ① 先让 whale_salience 算"现在值不值得开口"（含**紧急通道**）
+       ② 紧急 → 立刻说（绕开节奏闸与日限，只受 10 分钟硬间隔约束）
+       ③ 不紧急 → 再看"到没到点 / 今天说够没有"，最后才让人格 prompt 决定措辞
+      引擎不可用时（ev is None）**完整回落旧路径** —— 升级不该让整层哑掉。
+    """
     now = time.localtime()
     h = now.tm_hour
     import os as _os
@@ -1348,43 +1759,85 @@ def maybe_speak():
         _ctx0 = {}
     st = pace()
     _cap = daily_cap(st)
-    if st.get("said", 0) >= _cap:
-        _dbg(f"今天已说 {st['said']} 句（上限 {_cap}，按命中率重算）→ 只发定点/紧急")
-        return
     score = material_of(_ctx0)
-    gap, why = next_gap(_ctx0)
-    # 断点投递：刚拿起手机那一刻 → 允许更早开口（人正好在看屏幕）
-    bp, bp_why = breakpoint_now(_ctx0)
-    if bp:
-        gap = int(gap * 0.6)
-        why = why + "｜" + bp_why
-    # ★ 顺序很重要：先看"到没到点"，再看"划不划算"。
-    #   反过来的话，每次轮询（2 秒）都会跑一遍期望效用判断 → 空转刷屏。
-    may_speak = (not last) or (time.time() - last >= gap)
-    if not may_speak:
-        return                                    # 没到点就静默返回：不评估、不写日志
-    # ★ 评估节流：没到点的时候不评估；但"没说过话"时 may_speak 会一直为真，
-    #   所以这里再用一个独立时间戳兜住 —— 同一个 gap 内只评估一次，不刷屏。
-    try:
-        _last_eval = float(GATE_STAMP.read_text().strip())
-    except Exception:
-        _last_eval = 0
-    if _last_eval and time.time() - _last_eval < min(gap, 600):
-        return
-    try:
-        GATE_STAMP.write_text(str(int(time.time())))
-    except Exception:
-        pass
-    # 期望效用 gate：划不划算（Horvitz 1999）—— 只在"本来可以开口"时才评估
-    allow, uw = utility_gate(score)
-    if not allow:
-        health_bump("blocked", "gate")
-        _dbg("期望效用不足 → 不说：" + uw)
-        _log_decision("silent", gap, uw + "｜料=" + str(score), score, st)
-        return
-    # 结构化决策日志（**必须在 return 之前**：之前这段写在 return 后面，成了死代码）
-    _log_decision("speak", gap, why + "｜" + uw, score, st)
-    _dbg(f"这次间隔 {int(gap // 60)} 分钟（{why}）")
+    # 后验样本够（≥4）才拿它收紧开口；样本不足时用 None（否则 Beta(1,1)=0.5 会把一切挡住 → 死锁）
+    _p, _okfb, _badfb = _load_feedback_stats()
+    _pac = _p if (_okfb + _badfb) >= 4 else None
+    ev = salience_decide(_ctx0, said_today=int(st.get("said", 0)), p_accept=_pac,
+                         now=datetime.now(TZ).timetuple())
+
+    if ev is not None:
+        gap, why = next_gap(_ctx0)
+        if ev.get("urgent"):
+            # 紧急通道：只受硬间隔约束（防止 2 秒轮询把同一条紧急念十遍）
+            if last and time.time() - last < URGENT_MIN_GAP:
+                return
+            why = "紧急通道（%s）｜%s" % ((ev.get("top") or {}).get("kind", ""), ev.get("gate", ""))
+            _dbg(f"紧急开口（价值 {ev['score']}）：{why}")
+        else:
+            if st.get("said", 0) >= _cap:
+                _dbg(f"今天已说 {st['said']} 句（上限 {_cap}，{freq_conf().get('label')}档）→ 只发定点/紧急")
+                return
+            # 断点投递：刚拿起手机那一刻 → 允许更早开口（人正好在看屏幕）
+            bp, bp_why = breakpoint_now(_ctx0)
+            if bp:
+                gap = int(gap * 0.6)
+                why = why + "｜" + bp_why
+            # ★ 顺序很重要：先看"到没到点"，再看"划不划算"。
+            #   反过来的话，每次轮询（2 秒）都会跑一遍判断 → 空转刷屏。
+            if last and time.time() - last < gap:
+                return
+            try:
+                _last_eval = float(GATE_STAMP.read_text().strip())
+            except Exception:
+                _last_eval = 0
+            if _last_eval and time.time() - _last_eval < min(gap, 600):
+                return
+            try:
+                GATE_STAMP.write_text(str(int(time.time())))
+            except Exception:
+                pass
+            if not ev.get("say"):
+                health_bump("blocked", "salience")
+                _dbg("开口价值不够 → 不说：" + str(ev.get("gate")))
+                _log_decision("silent", gap, str(ev.get("gate")) + "｜料=" + str(score), score, st)
+                windows_shadow(st, gap, str(ev.get("gate")), said=False)
+                return
+            _log_decision("speak", gap, why + "｜" + str(ev.get("gate")), score, st)
+            windows_shadow(st, gap, why, said=True)
+            _dbg(f"这次间隔 {int(gap // 60)} 分钟（{why}）")
+        _pending_sal_ev = ev
+    else:
+        # ── 旧路径（引擎缺失时的完整兜底）────────────────────────────────
+        if st.get("said", 0) >= _cap:
+            _dbg(f"今天已说 {st['said']} 句（上限 {_cap}）→ 只发定点/紧急")
+            return
+        gap, why = next_gap(_ctx0)
+        bp, bp_why = breakpoint_now(_ctx0)
+        if bp:
+            gap = int(gap * 0.6)
+            why = why + "｜" + bp_why
+        if last and time.time() - last < gap:
+            return
+        try:
+            _last_eval = float(GATE_STAMP.read_text().strip())
+        except Exception:
+            _last_eval = 0
+        if _last_eval and time.time() - _last_eval < min(gap, 600):
+            return
+        try:
+            GATE_STAMP.write_text(str(int(time.time())))
+        except Exception:
+            pass
+        allow, uw = utility_gate(score)
+        if not allow:
+            health_bump("blocked", "gate")
+            _dbg("期望效用不足 → 不说：" + uw)
+            _log_decision("silent", gap, uw + "｜料=" + str(score), score, st)
+            return
+        _log_decision("speak", gap, why + "｜" + uw, score, st)
+        _dbg(f"这次间隔 {int(gap // 60)} 分钟（{why}）")
+        _pending_sal_ev = None
 
     try:
         ctx = hub("/llm-preview").get("would_send_to_model") or {}
@@ -1392,10 +1845,16 @@ def maybe_speak():
         return
     card = json.loads(CARD_PATH.read_text(encoding="utf-8"))
     said = recent()
+    _hint = ""
+    if _pending_sal_ev and _pending_sal_ev.get("top"):
+        _hint = ("\n★ 引擎算出**现在最值得说的就是这一条**：%s（开口价值 %d/100；"
+                 "若你觉得它其实不值得说，可以只输出 [SILENT]）\n"
+                 % (_pending_sal_ev["top"].get("why"), _pending_sal_ev["score"]))
     prompt = (
         f"现在是 {time.strftime('%H:%M')}。主人今天的情况（已脱敏）：\n"
         f"{json.dumps(ctx, ensure_ascii=False)}\n\n"
-        + (("最近你已经说过的话：\n" + "\n".join(said) + "\n\n") if said else "")
+        + ((("最近你已经说过的话：\n" + "\n".join(said) + "\n\n")) if said else "")
+        + _hint
         + "现在做一个判断：要不要跟主人说点什么？\n"
           "· **最近已经说过的事不要再重复提**（上面列了你说过的话）；数字一样、事一样就算重复\n"
           "· 有新的、值得说的 → 只说**最值得说的那一条**，别把今天的情况全倒一遍\n"
@@ -1459,7 +1918,10 @@ def maybe_speak():
     #   （动作前缀+措辞一变 n-gram 就全变）—— 所以去重必须在**事实层**，不在措辞层。
     try:
         import whale_facts as _wf
-        if _is_meter_report(out):
+        # ★ 紧急通道的话**不做事实去重**：紧急的定义就是"时间敏感、错过就没用"，
+        #   天然是新信息。2026-09-29 实测：11:00 的课被这条闸门当"数值没变"静默拦掉 ✗
+        _urgent_msg = bool(_pending_sal_ev and _pending_sal_ev.get("urgent"))
+        if _is_meter_report(out) and not _urgent_msg:
             _ok_new, _changed, _sig = _wf.novel_facts(ctx, last_signature())
             if not _ok_new:
                 _st["silent"] = _st.get("silent", 0) + 1
@@ -1475,16 +1937,27 @@ def maybe_speak():
         # 例外：定点提醒/上课/紧急走的是另一条路，不受这里影响。
         _kind = topic_kind(out)
         _h = time.localtime().tm_hour
-        if not goldilocks_ok(_kind, _h):
+        # ★★ 2026-09-29 修（用户："为什么中午没有提醒"）：
+        #   上面注释白纸黑字写着"例外：…紧急走的是另一条路，不受这里影响" ✗
+        #   但代码**根本没判断紧急** ✓ → 紧急消息被这行拦掉 ✓
+        #   实测：13:05~14:16 八次"紧急通道（weather）价值 94"全部止步于此 ✗
+        #   （中午想说天气大概是要下雨 ✓ 正是最该说的时候 ✗）
+        #   所以：紧急消息**跳过此处**；被拦的也记决策日志，便于回看 ✓
+        if not _urgent_msg and not goldilocks_ok(_kind, _h):
             health_bump("blocked", "topic_window")
             _dbg(f"话题『{_kind}』不在时间窗（{_h} 点）→ 这次不说")
             _log_decision("silent", 0, f"goldilocks：{_kind} 不在窗内（{_h} 点）", 0, pace())
             return False
 
+        if _urgent_msg and not goldilocks_ok(_kind, _h):
+            health_bump("blocked", "topic_window_bypassed_urgent")
+            _dbg(f"紧急消息『{_kind}』跳过话题时间窗（{_h} 点）—— 紧急不受窗口限制 ✓")
         ok, info = deliver(out)
         _dbg(f"主动说：{out[:40]}" if ok else f"主动说被拒：{info[:70]}")
         if ok:
             remember(out)
+            if _pending_sal_ev:
+                sal_note(_pending_sal_ev)          # 记账：同类同值再说就贬值（防"换着说法说 23 遍"）
             _st["said"] = _st.get("said", 0) + 1
             _st["silent"] = 0
             _save_pace(_st)
@@ -1494,6 +1967,10 @@ def maybe_speak():
 
 def main():
     _dbg("启动：会拿主意的嘴（定点照发 / 平时自己判断要不要说）")
+    try:
+        _dbg("频率档 %s：%s" % (freq_mode(), freq_conf()))
+    except Exception:
+        pass
     try:
         startup_selfcheck()
     except Exception as _e:

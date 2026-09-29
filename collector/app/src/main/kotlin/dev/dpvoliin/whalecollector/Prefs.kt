@@ -58,6 +58,11 @@ object P {
         set(v) = sp().edit().putBoolean("music_title", v).apply()
 
     /** 采集订单/快递？（只报类型与金额区间，绝不存商品名）。 */
+    /** 用**通知**收她的提醒（默认开 ✓ 不经过微信 → 不会被限流 ✓） */
+    var notifyOn: Boolean
+        get() = sp().getBoolean("notify", true)
+        set(v) = sp().edit().putBoolean("notify", v).apply()
+
     var ordersOn: Boolean
         get() = sp().getBoolean("orders_on", true)
         set(v) = sp().edit().putBoolean("orders_on", v).apply()

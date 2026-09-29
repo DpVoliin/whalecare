@@ -2019,33 +2019,110 @@ def fetch_weather(days=2):
     return n
 
 
-def weather_of(which=0):
-    """which=0 今天 / 1 明天。只认 12 小时内的数据，避免拿旧天气说事。"""
+_DATE_RE = None
+
+
+def day_of(m, today=None):
+    """一条 weather.day 的 meta 到底指**哪一天**。返回 date 或 None。
+
+    两种来源形状都要认：
+      · 中国天气网（主）：`date="9/28"`（**不补零**）、没有 for_day
+      · Open-Meteo（兜底）：`for_day="2026-09-29"`（ISO）
+    ★ 为什么要专门有此函数（2026-09-29 修的真 bug）：
+      60_analysis 原来直接对 `date` 做**字符串排序** —— "10/1" < "9/28"（'1' < '9'）
+      ⇒ 9→10 月交界时"今天"被挑成三天后、"明天"被挑成昨天 ✗
+      （真实语料里"明天有冰雹""早上提醒明早的干嘛"就是这么来的）。
+    """
+    global _DATE_RE
+    if _DATE_RE is None:
+        import re as _re
+        _DATE_RE = _re.compile(r"^(?:(\d{4})[-/])?(\d{1,2})[-/](\d{1,2})$")
+    if not isinstance(m, dict):
+        return None
+    today = today or datetime.now(TZ).date()
+    for raw in (m.get("for_day"), m.get("date")):
+        mt = _DATE_RE.match(str(raw or "").strip())
+        if not mt:
+            continue
+        y, mo, d = mt.group(1), int(mt.group(2)), int(mt.group(3))
+        cands = []
+        for cy in ([int(y)] if y else [today.year, today.year + 1, today.year - 1]):
+            try:
+                cands.append(datetime(cy, mo, d).date())
+            except Exception:
+                continue
+        cands = [c for c in cands if abs((c - today).days) <= 200]      # 跨年/跨月自动纠
+        if cands:
+            return min(cands, key=lambda c: abs((c - today).days))
+    return None
+
+
+def weather_days(today=None, fresh_hours=12, city_code=None):
+    """未来几天的预报，**按真实日期排序**（最早一条 = 今天），已过去的日子剔除。
+
+    每天只留**最新一次抓取**的那条（否则同一个日期会有多份重复记录）。
+    `city_code` 给了就只认这个城市（多地用户各看各的，与 llm_context 的口径一致）。
+    """
+    today = today or datetime.now(TZ).date()
     try:
         with db() as c:
             rows = c.execute("SELECT ts, meta FROM metrics WHERE metric='weather.day' "
-                             "ORDER BY ts DESC LIMIT 4").fetchall()
+                             "ORDER BY ts DESC LIMIT 12").fetchall()
     except Exception:
-        return None
-    seen = []
+        return []
+    best, order = {}, []
     for r in rows:
         try:
             m = json.loads(r["meta"] or "{}")
         except Exception:
             continue
-        if m.get("for_day") in [x.get("for_day") for x in seen]:
-            continue
         try:
-            fresh = (datetime.now(TZ) - datetime.fromisoformat(r["ts"])).total_seconds() < 12 * 3600
+            fresh = (datetime.now(TZ) - datetime.fromisoformat(r["ts"])).total_seconds() < fresh_hours * 3600
         except Exception:
             fresh = False
-        if fresh:
-            seen.append(m)
-    if len(seen) <= which:
-        return None
-    m = seen[which]
-    return {"desc": m.get("desc"), "tmin": m.get("tmin"), "tmax": m.get("tmax"), "rain_prob": m.get("rain"),
-            "for_day": m.get("for_day")}
+        if not fresh:
+            continue
+        if city_code and str(m.get("city_code") or city_code) != str(city_code):
+            continue
+        d = day_of(m, today)
+        if d is None or d < today:          # ★ 过去的日子不能冒充"今天/明天"
+            continue
+        if d in best:                       # 同一天：第一次遇到的就是最新的（按 ts DESC ✓）
+            continue
+        best[d] = m
+        order.append(d)
+    order.sort()
+    out = []
+    for d in order:
+        m = dict(best[d])
+        delta = (d - today).days
+        m["for_day"], m["date"] = d.isoformat(), d.isoformat()
+        m["label"] = ("今天" if delta == 0 else "明天" if delta == 1
+                      else "后天" if delta == 2 else "%d 天后" % delta)
+        m.setdefault("city", m.get("city") or "")
+        out.append(m)
+    return out
+
+
+def weather_of(which=0, today=None):
+    """which=0 今天 / 1 明天 —— 按**真实日期**取，不是"取第 N 条"。拿不到就 None。
+
+    踩过的三个坑（2026-09-29 一起修的）：
+      ① 按字符串排日期 → "10/1" < "9/28" ⇒ 挑错天 ✗
+      ② 去重键用 `for_day`，而主源（中国天气网）**根本不写 for_day**
+         → 全部都是 None → `None in [None]` → 只剩第一条 ⇒ **which=1 永远 None** ✗
+      ③ **按索引取第 N 条**本身就危险：今天的预报行一旦缺失，"第 0 条"就是明天、
+         "第 1 条"就是后天 ⇒ **后天的天气被当成今天讲**（宁可不说，也别讲错日子）
+    """
+    t = today or datetime.now(TZ).date()
+    want = (t + timedelta(days=int(which))).isoformat()
+    for m in weather_days(today=t):
+        if str(m.get("for_day")) == want:
+            return {"desc": m.get("desc"), "tmin": m.get("tmin"), "tmax": m.get("tmax"),
+                    # 主源不提供降水概率 → 老实给 None（**不编**）；有就给
+                    "rain_prob": m.get("rain") if m.get("rain") is not None else m.get("rain_prob"),
+                    "for_day": m.get("for_day"), "label": m.get("label"), "src": m.get("src") or ""}
+    return None
 
 
 
@@ -2757,12 +2834,17 @@ def llm_context(day=None):
                     _days.append(m)
         except Exception:
             pass
-        # 按日期排好：最早一条=今天，第二条=明天（不依赖"今天/明天"这种文案）
-        if _days:
-            _days.sort(key=lambda x: str(x.get("date") or ""))
-            w0 = w0 or _days[0]
-            if len(_days) > 1:
-                w1 = w1 or _days[1]
+        # ★ 天气的"今天/明天"必须按**真实日期**取（2026-09-29 修的真 bug）：
+        #   原来直接对 date 做字符串排序，而主源给的是**不补零**的 "9/28" →
+        #   "10/1" < "9/28" ⇒ 9→10 月交界时"今天"被挑成三天后、"明天"被挑成昨天 ✗
+        #   （真实语料里"明天有冰雹""早上提醒明早的干嘛"就是这么来的）
+        #   而且**不能按索引取第 N 条**：今天的行一旦缺失，"第 0 条"就成了明天
+        #   ⇒ 后天的天气被当成今天讲。所以按 for_day 精确匹配，缺了就**不给**。
+        _wd = weather_days(city_code=want)
+        _by_day = {str(x.get("for_day")): x for x in _wd}
+        _t = datetime.now(TZ).date()
+        w0 = w0 or _by_day.get(_t.isoformat())
+        w1 = w1 or _by_day.get((_t + timedelta(days=1)).isoformat())
         if w0 is None:
             w0 = weather_of(0)
         if w1 is None:
@@ -3902,6 +3984,15 @@ def analysis_view(q=None):
             "how_to_write": "POST /analysis {\"analysis\": {...}, \"engine\": \"模型名\"}（X-Token 头）；"
                             "可先干跑 POST /analysis?validate=1"}
 # ----------------------------------------------------------------- 调度线程
+def _close_recently(last: dict, now) -> bool:
+    """两小时内是否已经收过尾（晚间简报 22:30 / 睡前总结 22:15 内容重叠 ✗ 只留一条 ✓）。"""
+    try:
+        t = datetime.fromisoformat(last.get("close_at") or "")
+        return (now - t).total_seconds() < 2 * 3600
+    except Exception:
+        return False
+
+
 def scheduler():
     """每 5 秒看一眼：到点生成简报 / 发现异常立刻说（不依赖外部 cron）。
 
@@ -3943,9 +4034,17 @@ def scheduler():
                 bed_min, _n = est_bedtime()
                 fire_hm = f"{(bed_min - 15) % 1440 // 60:02d}:{(bed_min - 15) % 1440 % 60:02d}"
                 if hm == fire_hm and last.get("bed") != day:
+                    # ★ 2026-09-28 修（用户："又结尾了两次"）：晚间简报与睡前总结**内容重叠** ✗
+                    #   evening=22:30 · 睡前=推算入睡-15分(实测 22:15) → 相隔 15 分钟说两遍 ✓
+                    #   共用一个"今天已收尾"标记：两小时内只收一次 ✓（隔得久算两件事 ✓ 照发 ✓）
+                    if _close_recently(last, now):
+                        last["bed"] = day
+                        save_state(last)
+                        print("[sched] 刚收过尾（2 小时内）→ 跳过睡前总结，避免一天收两次", flush=True)
                     txt = bedtime_brief()
                     say(txt, "info", kind="brief_bedtime", key=f"bed:{day}", now=now, force=True)
                     last["bed"] = day
+                    last["close_at"] = now.isoformat(timespec="seconds")   # ★ 记"今天已收尾"
                     save_state(last)
             except Exception as e:
                 print(f"[bed] {e}", flush=True)
@@ -4114,7 +4213,15 @@ def scheduler():
 
             for key, kind in (("morning", "brief_morning"), ("evening", "brief_evening")):
                 if hm == CFG["schedule"][key] and last[key] != day:
+                    # ★ 白天那条照发；晚间这条若两小时内已收过尾就跳过（避免"结尾两次" ✓）
+                    if key == "evening" and _close_recently(last, now):
+                        last[key] = day
+                        save_state(last)
+                        print("[sched] 刚收过尾（2 小时内）→ 跳过晚间简报，避免一天收两次", flush=True)
+                        continue
                     last[key] = day
+                    if key == "evening":
+                        last["close_at"] = now.isoformat(timespec="seconds")
                     save_state(last)
                     compose_brief(kind)
         except Exception as e:
@@ -4481,6 +4588,35 @@ class Handler(BaseHTTPRequestHandler):
             with db() as c:
                 rows = c.execute("SELECT * FROM decisions ORDER BY id DESC LIMIT ?", (lim,)).fetchall()
             return self._send(200, {"count": len(rows), "items": [dict(r) for r in rows]})
+        if path.startswith("/asset/"):
+            # ★ 2026-09-29 加：把"她的形象素材"从中枢发给 app / 挂件 ✓
+            #   为什么走中枢而不是放进仓库：素材是主人的私有资源 ✗
+            #   公开仓库只留**占位图** ✓ 真图存在中枢本地目录 ✓ 换图不用重发版 ✓
+            #   鉴权：**只认 header X-Token** ✓（和全局一致 ✓
+            #   为什么不做 ?t= 兜底：那种写法会把 token 写进服务器日志/浏览器历史 ✓ 全局已明确禁止 ✓
+            #   → app 取素材必须走代码（带 header ✓）不能直接塞进 <img src> ✓）
+            #   安全：**白名单名字** + 只取 basename ✓ 杜绝 ../ 穿越 ✓
+            _name = os.path.basename(path[len("/asset/"):])
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{1,48}\.(png|jpg|jpeg|webp|ico|crt|wav|ogg|ttf|otf)", _name, re.I):
+                return self._send(400, {"ok": False, "error": "文件名不合规"})
+            # 第二道防线（入口本已全局鉴权 ✓ 这里再确认一次 ✓ 万一将来白名单松动也不至于裸奔 ✓）
+            if not self._auth(parse_qs(urlparse(self.path).query)):
+                return
+            _dir = pathlib.Path(os.getenv("WHALE_ASSETS") or (pathlib.Path(os.getenv("WHALE_HOME") or ".") / "assets"))
+            _f = _dir / _name
+            if not _f.is_file():
+                return self._send(404, {"ok": False, "error": "not found", "dir": str(_dir)})
+            _b = _f.read_bytes()
+            _ct = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp",
+                   "ico": "image/x-icon", "crt": "application/x-x509-ca-cert", "wav": "audio/wav",
+                   "ogg": "audio/ogg", "ttf": "font/ttf", "otf": "font/otf"}.get(_name.rsplit(".", 1)[-1].lower(), "application/octet-stream")
+            self.send_response(200)
+            self.send_header("Content-Type", _ct)
+            self.send_header("Content-Length", str(len(_b)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(_b)
+            return
         if path == "/bands":
             # ★ 这里原来是**只挂在 do_POST** 的：说话层用 GET 调（它无 body 时就走 GET），
             #   于是永远 404 → 分桶后验静默失效、一直退回全局后验（今天才查出来）。

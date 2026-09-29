@@ -706,12 +706,17 @@ def llm_context(day=None):
                     _days.append(m)
         except Exception:
             pass
-        # 按日期排好：最早一条=今天，第二条=明天（不依赖"今天/明天"这种文案）
-        if _days:
-            _days.sort(key=lambda x: str(x.get("date") or ""))
-            w0 = w0 or _days[0]
-            if len(_days) > 1:
-                w1 = w1 or _days[1]
+        # ★ 天气的"今天/明天"必须按**真实日期**取（2026-09-29 修的真 bug）：
+        #   原来直接对 date 做字符串排序，而主源给的是**不补零**的 "9/28" →
+        #   "10/1" < "9/28" ⇒ 9→10 月交界时"今天"被挑成三天后、"明天"被挑成昨天 ✗
+        #   （真实语料里"明天有冰雹""早上提醒明早的干嘛"就是这么来的）
+        #   而且**不能按索引取第 N 条**：今天的行一旦缺失，"第 0 条"就成了明天
+        #   ⇒ 后天的天气被当成今天讲。所以按 for_day 精确匹配，缺了就**不给**。
+        _wd = weather_days(city_code=want)
+        _by_day = {str(x.get("for_day")): x for x in _wd}
+        _t = datetime.now(TZ).date()
+        w0 = w0 or _by_day.get(_t.isoformat())
+        w1 = w1 or _by_day.get((_t + timedelta(days=1)).isoformat())
         if w0 is None:
             w0 = weather_of(0)
         if w1 is None:
