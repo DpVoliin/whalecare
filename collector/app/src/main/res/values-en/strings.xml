@@ -28,4 +28,15 @@
     <string name="switch_notify">Her reminders as notifications (no WeChat)</string>
     <string name="section_connect">Connection</string>
     <string name="section_keepalive">Keep alive</string>
+    <string name="title_settings">Settings</string>
+    <string name="home_status_default">Checking in…</string>
+    <string name="home_section_said">What she said today</string>
+    <string name="home_said_empty">Nothing yet today — she waits until there is something worth saying.</string>
+    <string name="home_section_link">Connection</string>
+    <string name="home_link_default">Not connected to the hub yet</string>
+    <string name="btn_home_sync">Report now</string>
+    <string name="btn_home_settings">Settings</string>
+    <string name="home_never">never reported successfully</string>
+    <string name="home_min_ago">%1$d min ago</string>
+    <string name="home_hours_ago">%1$d h ago</string>
 </resources>

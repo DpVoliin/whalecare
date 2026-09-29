@@ -28,4 +28,15 @@
     <string name="switch_notify">用通知收她的提醒（不走微信）</string>
     <string name="section_connect">连接</string>
     <string name="section_keepalive">后台保活</string>
+    <string name="title_settings">设置</string>
+    <string name="home_status_default">正在看看情况…</string>
+    <string name="home_section_said">她今天说过的话</string>
+    <string name="home_said_empty">今天还没说什么 —— 她在等你先出声，或者等有值得说的再说。</string>
+    <string name="home_section_link">连接</string>
+    <string name="home_link_default">还没和中枢连上</string>
+    <string name="btn_home_sync">立即上报一次</string>
+    <string name="btn_home_settings">设置</string>
+    <string name="home_never">从没成功上报过</string>
+    <string name="home_min_ago">%1$d 分钟前</string>
+    <string name="home_hours_ago">%1$d 小时前</string>
 </resources>

@@ -162,4 +162,18 @@ object Hub {
         }
         return acked.size
     }
+
+    /** 拉中枢的 /today —— 首页用：她今天说过的话 + 今天的课 ✓（只读，不改任何状态 ✓） */
+    fun today(context: Context): JSONObject? = runCatching {
+        val url = P.hubUrl
+        if (url.isBlank() || P.token.isBlank()) return null
+        val conn = TlsTofu.open(context, "$url/today")
+        conn.connectTimeout = 8000
+        conn.readTimeout = 10000
+        conn.setRequestProperty("X-Token", P.token)
+        val txt = conn.inputStream.bufferedReader().use { it.readText() }
+        conn.disconnect()
+        JSONObject(txt)
+    }.getOrNull()
+
 }

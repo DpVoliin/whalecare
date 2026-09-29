@@ -58,7 +58,7 @@ object Notifier {
     fun show(ctx: Context, nid: Int, text: String, kind: String = ""): Boolean {
         ensureChannel(ctx)
         val open = PendingIntent.getActivity(
-            ctx, 0, Intent(ctx, MainActivity::class.java),
+            ctx, 0, Intent(ctx, SettingsActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         fun action(action: String, label: String, requestCode: Int): NotificationCompat.Action {
