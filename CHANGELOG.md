@@ -1,4 +1,29 @@
 
+## v0.2.3 — 2026-09-29（安全修复）
+
+来源：`cloudflare/security-audit-skill` 完整审查（run-1，源码只读）。两条 confirmed 已修。
+
+### 安全修复
+- **C3（medium）`/consent` 是唯一免鉴权的状态写端点** —— 它在 `do_POST` 里位于
+  `if not self._auth(q)` **之前**并直接 `return`，于是任何能连上中枢的未认证客户端
+  一句 POST 就能翻转健康数据的显式同意（`granted=true` → `health.*`/`sleep.*` 开始入库；
+  `false` → 健康指标被静默丢弃，且查不出原因）。
+  → 已把该分支移动到鉴权闸口之后；采集器/脚本带 `X-Token` 时照常可用，管理台走 Cookie 不受影响。
+- **C4（low）请求行日志把凭据写进 hub.log** —— `/api/mcu` 允许 query 携带 token、配对链接带一次性码，
+  基类默认把整行请求（含 query）打进日志。
+  → `log_message` 落盘前只对凭据参数打码（`token|code|t|pin|key|secret` → `***`），其余照旧。
+
+### 测试
+- 新增 `tests/test_security_audit_fixes.py` 6 个用例：匿名 POST `/consent` 必须 401、
+  带 token 必须照常 200、撤销同意要真的生效、query 里的 token 与配对码不得明文落日志、
+  正常请求行不受影响。
+- ⚠️ 写测试过程中真抓到一次自己的错：第一版把分支挪进了 **do_GET** 的闸口（POST 会 404，)
+  正是该段注释里警告过的坑）→ 改为先定位 `def do_POST` 再插，测试随即转绿。
+
+### 未修（留给下一次，见审查产物）
+- C1 桌面挂件明文回退传 token、C2 导出脱敏不完整、以及 4 条 needs_validation。
+  完整报告：`~/security-audit-skill/whalecare/run-1/`（不在仓库内）。
+
 ## v0.2.2 — 2026-09-29
 
 ### 新增

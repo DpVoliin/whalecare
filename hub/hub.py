@@ -68,7 +68,7 @@ except OSError:
     pass
 CFG_PATH = os.path.join(BASE, "hub.json")
 DB_PATH = os.path.join(BASE, "hub.db")
-VERSION = "0.2.2"
+VERSION = "0.2.3"
 TZ = timezone(timedelta(hours=8))          # 北京时间（用户在国内，固定 +8，避免服务器 UTC 漂移）
 
 DEFAULT_CFG = {
@@ -4355,8 +4355,19 @@ def ingest_items(body):
 class Handler(BaseHTTPRequestHandler):
     server_version = f"hub/{VERSION}"
 
+    # ★ 凭据绝不能进日志（2026-09-29 安全审查 C4）：
+    #   /api/mcu 允许在 query 里带 token（给最小设备用）、配对链接里带一次性码，
+    #   而基类默认会把**整行请求**（含 query）打进日志 → token/码就这样落盘。
+    #   只对**凭据参数**打码，其余照旧（可观测性不受影响）。
+    _SECRET_Q = re.compile(r"(?i)\b(token|code|t|pin|key|secret)=([^&\s]*)")
+
     def log_message(self, fmt, *args):
-        print(f"[http] {self.address_string()} {fmt % args}", flush=True)
+        try:
+            msg = fmt % args if args else str(fmt)
+        except Exception:
+            msg = str(fmt)
+        masked = self._SECRET_Q.sub(r"\1=***", msg)
+        print(f"[http] {self.address_string()} {masked}", flush=True)
 
     # ---- 工具
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
@@ -4701,6 +4712,13 @@ class Handler(BaseHTTPRequestHandler):
         if _n > MAX_BODY:
             return self._send(413, {"error": f"请求太大，上限 {MAX_BODY // 1024}KB"})
         # 登录/管理台要在鉴权之前（登录本身就是"还没登录"时做的）
+        if path == "/login":
+            return self._login_post()
+        if path == "/admin":
+            return self._admin_post(q)
+        if not self._auth(q):
+            return
+        # ★ 它是**状态写**端点（翻转特殊类别数据的同意），必须在鉴权之后（安全审查 C3）
         if path == "/consent":
             # POST {"what":"health","granted":true} → 记录**显式同意**（采集器打开健康开关时调）
             # ★ 两个坑都踩过（记下来）：
@@ -4717,12 +4735,6 @@ class Handler(BaseHTTPRequestHandler):
                         source=(_b or {}).get("device") or self._client(),
                         version=(_b or {}).get("version") or "")
             return self._send(200, {"ok": True, "what": _what, "granted": consent_granted(_what)})
-        if path == "/login":
-            return self._login_post()
-        if path == "/admin":
-            return self._admin_post(q)
-        if not self._auth(q):
-            return
         if path == "/bands":
             # 分桶接受率（说话层用它做期望效用 gate；样本不足的桶会被标 reliable=false）
             return self._send(200, band_stats())

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whalecare"
-version = "0.2.2"
+version = "0.2.3"
 description = "鲸鲸 · 自托管的个人数据中枢：常驻、能读你自己的数据、能主动关心"
 readme = "README.md"
 requires-python = ">=3.11"
