@@ -17,8 +17,6 @@ import io
 import json
 import os
 import pathlib
-import subprocess
-import sys
 import tempfile
 import threading
 import unittest
