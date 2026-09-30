@@ -144,6 +144,23 @@ by **mechanisms**, not by "remembering to check":
   "wrong-time delivery / out-of-band message rate / quiet hours broken" as invariants: it exits
   non-zero when one breaks. Runs in CI on every push.
 
+## How often she speaks (rate tiers)
+
+Four tiers, one command to switch, **effective within 2 minutes** (no restart):
+
+| Tier | Daily cap | Speak / urgent threshold | Interval multiplier | Small-talk |
+|---|---|---|---|---|
+| `quiet` | **4** | 65 / 85 | ×2.50 | none |
+| `low` | **9** | 55 / 72 | ×1.70 | none |
+| `normal` (default) | **12** | 38 / 62 | ×1.00 | 1 |
+| `high` | **24** | 22 / 50 | ×0.60 | 2 |
+
+Three things people get wrong: the cap is only **one of four** things a tier changes (changing the
+cap alone gives a "fake effect" — the threshold still gates you); the **urgent channel ignores the
+cap** (disk nearly full, battery dying, weather warnings, class starting — those are always said);
+and `quiet` adds a **time gate** on top (07–09 / 11–14 / 21–24 only) because raising a threshold
+cannot control *when* something is said.
+
 ## Delivery channels (beyond WeChat)
 
 The primary path is *speaker → gateway webhook → WeChat*. The hub also ships its own
