@@ -3,9 +3,10 @@
 #
 # 用法（三档都是**显式**的，脚本不替你猜；改完 2 分钟内生效，不用重启）：
 #     bash spk_freq.sh            # 看现在是什么档 + 今天说了几条
-#     bash spk_freq.sh low        # 低频：阈值 55 / 上限 4 条 / 间隔 ×1.70 / 不闲聊
-#     bash spk_freq.sh normal     # 标准：阈值 38 / 上限 9 条 / 间隔 ×1.00 / 闲聊 1 条
-#     bash spk_freq.sh high       # 高频：阈值 22 / 上限 16 条 / 间隔 ×0.60 / 闲聊 2 条
+#     bash spk_freq.sh quiet      # 静默：阈值 65 / 上限 4 条 / 间隔 ×2.50 / 不闲聊（只在早中晚三个时段）
+#     bash spk_freq.sh low        # 低频：阈值 55 / 上限 9 条 / 间隔 ×1.70 / 不闲聊
+#     bash spk_freq.sh normal     # 标准：阈值 38 / 上限 12 条 / 间隔 ×1.00 / 闲聊 1 条
+#     bash spk_freq.sh high       # 高频：阈值 22 / 上限 24 条 / 间隔 ×0.60 / 闲聊 2 条
 #
 # 为什么是"档"而不是一个数字：档位同时改**开口阈值、每天上限、间隔倍率、闲聊额度**四样，
 # 只调其中一样会出现"上限放开了但阈值还卡着，等于没变"这种假生效（踩过）。
@@ -18,11 +19,12 @@ CARD_PY="$S/whale_salience.py"
 
 LABEL=""
 case "${1:-show}" in
+  quiet|silent) LABEL="静默" ;;
   low)          LABEL="低频" ;;
   normal|std)   LABEL="标准" ;;
   high)         LABEL="高频" ;;
   ""|show|--show|-s|status) LABEL="" ;;
-  *) echo "  用法：bash spk_freq.sh [low|normal|high|show]"; exit 1 ;;
+  *) echo "  用法：bash spk_freq.sh [quiet|low|normal|high|show]"; exit 1 ;;
 esac
 
 if [ -n "$LABEL" ]; then
@@ -57,9 +59,10 @@ echo "  ── 当前档位 ──"
 $PY - "$MODE_FILE" "$CARD_PY" <<'PYEOF'
 import json, sys, pathlib
 mode_file, card_py = sys.argv[1], sys.argv[2]
-mods = {"low": {"label": "低频", "speak": 55, "urgent": 72, "cap": 4, "gap_mult": 1.70, "chat": 0},
-        "normal": {"label": "标准", "speak": 38, "urgent": 62, "cap": 9, "gap_mult": 1.00, "chat": 1},
-        "high": {"label": "高频", "speak": 22, "urgent": 50, "cap": 16, "gap_mult": 0.60, "chat": 2}}
+mods = {"quiet": {"label": "静默", "speak": 65, "urgent": 85, "cap": 4,  "gap_mult": 2.50, "chat": 0},
+        "low": {"label": "低频", "speak": 55, "urgent": 72, "cap": 9,  "gap_mult": 1.70, "chat": 0},
+        "normal": {"label": "标准", "speak": 38, "urgent": 62, "cap": 12, "gap_mult": 1.00, "chat": 1},
+        "high": {"label": "高频", "speak": 22, "urgent": 50, "cap": 24, "gap_mult": 0.60, "chat": 2}},
 try:
     import importlib.util as iu
     spec = iu.spec_from_file_location("sal_tool", card_py)

@@ -27,13 +27,13 @@ from datetime import datetime, timedelta, timezone
 TZ = timezone(timedelta(hours=8))
 
 HUB = os.getenv("WHALE_HUB") or "https://your-hub.example.com:11443"
-CA = "/home/ubuntu/hub/tls/hub.crt"
+CA = "hub/tls/hub.crt"
 TOKEN = os.getenv("WHALE_TOKEN") or ""   # 只从环境读（.whale_env）；不再留任何写死的回退值
 TERMINAL = "weixin"
 
 WEBHOOK_URL = "http://127.0.0.1:8644/webhooks/whale-hub"
-SECRET_FILE = "/home/ubuntu/.hermes/scripts/.whale_hub_secret"
-CARD_PATH = pathlib.Path("/home/ubuntu/.hermes/scripts/whale_card.json")
+SECRET_FILE = "./.whale_hub_secret"
+CARD_PATH = pathlib.Path("./whale_card.json")
 _CARD_CACHE = {"at": 0.0, "card": None}
 
 
@@ -58,10 +58,10 @@ def load_card():
     _CARD_CACHE.update(at=_t.time(), card=card)
     return card
 # ★ 运行目录（本机固定；仓库版用 WHALE_SPEAKER_DIR 可配置 ✓）
-BASE = pathlib.Path("/home/ubuntu/.hermes/scripts")
+BASE = pathlib.Path(".")
 
-RECENT_PATH = pathlib.Path("/home/ubuntu/.hermes/scripts/.whale_said.jsonl")
-LAST_PROACTIVE = pathlib.Path("/home/ubuntu/.hermes/scripts/.whale_last_proactive")
+RECENT_PATH = pathlib.Path("./.whale_said.jsonl")
+LAST_PROACTIVE = pathlib.Path("./.whale_last_proactive")
 CONFIG = pathlib.Path("/home/ubuntu/.hermes/config.yaml")
 
 POLL = 2.0                     # 秒：定点/紧急的响应速度
@@ -73,14 +73,14 @@ GAP_MIN, GAP_MAX = 15 * 60, 90 * 60
 # ★ 紧急通道的硬间隔：紧急消息绕开节奏闸与日限，但**不能**被 2 秒轮询重复念
 #   （真实事故：睡前总结连发三条就是没有硬间隔造成的）
 URGENT_MIN_GAP = int(os.getenv("WHALE_URGENT_MIN_GAP", "600"))
-GATE_STAMP = pathlib.Path("/home/ubuntu/.hermes/scripts/.whale_last_gate")   # 上次"评估期望效用"的时间戳（防轮询空转刷屏）       # 主动说话的间隔上下限（秒）：最快 5 分钟，最慢 90 分钟
+GATE_STAMP = pathlib.Path("./.whale_last_gate")   # 上次"评估期望效用"的时间戳（防轮询空转刷屏）       # 主动说话的间隔上下限（秒）：最快 5 分钟，最慢 90 分钟
 SAY_MAX_PER_DAY = 12                     # 每日上限（硬顶，可配置）
 # ★ 冷启动期（还没有任何反馈时）每天最多试探着说几条 —— 太少收集不到反馈，太多会烦人 ✓
 COLD_START_PER_DAY = int(os.getenv("WHALE_COLD_START_PER_DAY", "3"))
 SAY_MIN_PER_DAY = 4                      # 被 ✗ 打到底时的下限 —— 再少就变成"坏掉"了
 
 
-FREQ_REF_CAP = 9          # "标准档"的每天上限 —— 频率档用 cap/9 当倍率，免得再引入第二个参数
+FREQ_REF_CAP = 12         # "标准档"的每天上限 —— 频率档用 cap/12 当倍率（2026-09-29 上限调整：4/9/12/24）
 
 
 def freq_clamp_cap(base: int) -> int:
@@ -114,15 +114,15 @@ def daily_cap(st=None):
         return int(freq_clamp_cap(max(SAY_MIN_PER_DAY, min(SAY_MAX_PER_DAY, cap))))
     except Exception:
         return SAY_MAX_PER_DAY
-PACE_PATH = pathlib.Path("/home/ubuntu/.hermes/scripts/.whale_pace.json")
+PACE_PATH = pathlib.Path("./.whale_pace.json")
 
 # ─────────────── 评分引擎 v2（whale_salience）+ 频率档 ───────────────
 # 为什么换：旧料分是"等权布尔相加 + 3 个档位"，只数件数、不看轻重时效与新鲜度，
 # 而且同一个分既决定"说勤点"又决定"够不够格开口"。详见 speaker/whale_salience.py 文件头。
 # 契约不变的地方：material_score(ctx) 仍返回 (0—10 的整数, 理由列表)，
 # 所以 next_gap/utility_gate/单测/一周模拟的判据都还能用；变化的是分怎么来的。
-SAL_PATH = pathlib.Path(os.getenv("WHALE_SALIENCE", "/home/ubuntu/.hermes/scripts/.whale_salience.json"))
-FREQ_PATH = pathlib.Path(os.getenv("WHALE_FREQ", "/home/ubuntu/.hermes/scripts/.whale_freq.json"))
+SAL_PATH = pathlib.Path(os.getenv("WHALE_SALIENCE", "./.whale_salience.json"))
+FREQ_PATH = pathlib.Path(os.getenv("WHALE_FREQ", "./.whale_freq.json"))
 _FREQ = {"at": 0.0, "mode": "normal"}
 
 
@@ -151,10 +151,38 @@ def freq_mode() -> str:
     return _FREQ.get("mode") or "normal"
 
 
+# ★ 静默模式（2026-09-29 加）：一天最多 4 条，且**只在早/中/睡前**开口
+#   为什么单列窗口而不是只调高阈值：阈值只管"值不值得说" ✗ 管不住"什么时候说" ✓
+#   静默的本意是"白天别打扰我" ✓ 而不是"该说的时候也别说" ✓
+#   紧急通道仍然放行（磁盘快满/电量见底/下节课快到 —— 那是关键信息 ✓ 正是要留的那类 ✓）
+QUIET_WINDOWS = ((7, 9), (11, 14), (21, 24))
+
+# 这类"说满了"的提示 5 分钟只打一行 —— 主循环 2 秒一轮，不打节流会把日志刷爆 ✗
+_CAP_LOG_AT = [0.0]
+
+
+def _cap_dbg(msg: str) -> None:
+    if time.time() - _CAP_LOG_AT[0] < 300:
+        return
+    _CAP_LOG_AT[0] = time.time()
+    _dbg(msg)
+
+
+def quiet_window_ok() -> bool:
+    """静默模式下：现在是否在允许开口的时段（非静默档永远返回 True ✓）"""
+    try:
+        if freq_mode() != "quiet":
+            return True
+    except Exception:
+        return True
+    h = time.localtime().tm_hour
+    return any(a <= h < b for a, b in QUIET_WINDOWS)
+
+
 def freq_conf() -> dict:
     _s = _sal_mod()
     if not _s:
-        return {"label": "标准", "speak": 38, "urgent": 62, "cap": 9, "gap_mult": 1.0, "chat": 1}
+        return {"label": "标准", "speak": 38, "urgent": 62, "cap": 12, "gap_mult": 1.0, "chat": 1}
     return _s.MODES.get(freq_mode()) or _s.MODES["normal"]
 
 
@@ -419,7 +447,7 @@ def hub(path, payload=None):
 # 主人的"最后说话时间"只从**本机** Hermes 会话库只读读取，不外发；
 # 读不到就什么都不记 —— 宁可不学，也不冤枉她。
 IMPLICIT_ON = os.getenv("WHALE_IMPLICIT", "1").lower() not in ("0", "false", "no", "off")
-ATTRIB = pathlib.Path(os.getenv("WHALE_ATTRIB", "/home/ubuntu/.hermes/scripts/.whale_attrib.json"))
+ATTRIB = pathlib.Path(os.getenv("WHALE_ATTRIB", "./.whale_attrib.json"))
 HERMES_DB = pathlib.Path(os.getenv("WHALE_HERMES_DB", os.path.expanduser("~/.hermes/state.db")))
 SILENCE_DOWN_MIN = 180          # 多久没人影就算"不在场"→ 不记负反馈
 
@@ -1266,7 +1294,7 @@ def last_signature():
 #   → 提醒在中枢里仍是"待发" → 下一轮又取到同一条 → 又发一遍 ✗✗
 #   解法：**发成功就本地记 id**；下次取到同 id 直接跳过并补回执 ✓
 #   （宁可"本地记了但中枢没收到回执"→ 多补一次 ack ✓ 也不能重复打扰主人 ✓）
-SENT_PATH = pathlib.Path("/home/ubuntu/.hermes/scripts/.whale_sent_ids.jsonl")
+SENT_PATH = pathlib.Path("./.whale_sent_ids.jsonl")
 
 
 def _sent_ids_load():
@@ -1776,7 +1804,7 @@ def maybe_speak():
             _dbg(f"紧急开口（价值 {ev['score']}）：{why}")
         else:
             if st.get("said", 0) >= _cap:
-                _dbg(f"今天已说 {st['said']} 句（上限 {_cap}，{freq_conf().get('label')}档）→ 只发定点/紧急")
+                _cap_dbg(f"今天已说 {st['said']} 句（上限 {_cap}，{freq_conf().get('label')}档）→ 只发定点/紧急")
                 return
             # 断点投递：刚拿起手机那一刻 → 允许更早开口（人正好在看屏幕）
             bp, bp_why = breakpoint_now(_ctx0)
@@ -1810,7 +1838,7 @@ def maybe_speak():
     else:
         # ── 旧路径（引擎缺失时的完整兜底）────────────────────────────────
         if st.get("said", 0) >= _cap:
-            _dbg(f"今天已说 {st['said']} 句（上限 {_cap}）→ 只发定点/紧急")
+            _cap_dbg(f"今天已说 {st['said']} 句（上限 {_cap}）→ 只发定点/紧急")
             return
         gap, why = next_gap(_ctx0)
         bp, bp_why = breakpoint_now(_ctx0)
@@ -1943,6 +1971,11 @@ def maybe_speak():
         #   实测：13:05~14:16 八次"紧急通道（weather）价值 94"全部止步于此 ✗
         #   （中午想说天气大概是要下雨 ✓ 正是最该说的时候 ✗）
         #   所以：紧急消息**跳过此处**；被拦的也记决策日志，便于回看 ✓
+        # ★ 静默模式：非紧急时只在早/中/睡前开口（2026-09-29）
+        if not _urgent_msg and not quiet_window_ok():
+            health_bump("blocked", "quiet_window")
+            _dbg("静默模式：现在不在早/中/睡前时段 → 这次不说")
+            return False
         if not _urgent_msg and not goldilocks_ok(_kind, _h):
             health_bump("blocked", "topic_window")
             _dbg(f"话题『{_kind}』不在时间窗（{_h} 点）→ 这次不说")

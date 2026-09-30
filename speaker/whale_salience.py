@@ -42,9 +42,10 @@ import time
 
 # ── 频率档：只动"阈值 / 额度 / 间隔倍率"，不动属性算法 ────────────────────────
 MODES = {
-    "low":    {"label": "低频", "speak": 55, "urgent": 72, "cap": 4,  "gap_mult": 1.70, "chat": 0},
-    "normal": {"label": "标准", "speak": 38, "urgent": 62, "cap": 9,  "gap_mult": 1.00, "chat": 1},
-    "high":   {"label": "高频", "speak": 22, "urgent": 50, "cap": 16, "gap_mult": 0.60, "chat": 2},
+    "quiet":  {"label": "静默", "speak": 65, "urgent": 85, "cap": 4,  "gap_mult": 2.50, "chat": 0},
+    "low":    {"label": "低频", "speak": 55, "urgent": 72, "cap": 9,  "gap_mult": 1.70, "chat": 0},
+    "normal": {"label": "标准", "speak": 38, "urgent": 62, "cap": 12, "gap_mult": 1.00, "chat": 1},
+    "high":   {"label": "高频", "speak": 22, "urgent": 50, "cap": 24, "gap_mult": 0.60, "chat": 2},
 }
 DEFAULT_MODE = "normal"
 MODE_FILE = "/home/ubuntu/.hermes/scripts/.whale_freq.json"
