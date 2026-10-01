@@ -4,7 +4,7 @@
 [versions]
 agp = "9.4.1"
 core = "1.19.0"
-appcompat = "1.7.0"
+appcompat = "1.8.0"
 
 [libraries]
 androidx-core = { group = "androidx.core", name = "core-ktx", version.ref = "core" }
