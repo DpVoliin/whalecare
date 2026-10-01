@@ -3,7 +3,7 @@
 # ★ 也没有 kotlin 版本了：AGP 9 **内置 Kotlin**，不再 apply kotlin.android 插件（喜欢再自行指定）。
 [versions]
 agp = "9.4.1"
-core = "1.19.0"
+core = "1.19.1"
 appcompat = "1.7.0"
 
 [libraries]
