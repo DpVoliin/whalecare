@@ -2,7 +2,7 @@
 #   而 AGP 9 又要求 Gradle 9 —— 单独合任何一个都会让构建失败（dependabot 拆三条 PR 踩过）。
 # ★ 也没有 kotlin 版本了：AGP 9 **内置 Kotlin**，不再 apply kotlin.android 插件（喜欢再自行指定）。
 [versions]
-agp = "9.4.1"
+agp = "9.5.0"
 core = "1.19.0"
 appcompat = "1.7.0"
 
